@@ -25,11 +25,11 @@ def _base_script(**overrides) -> dict:
         "educational_note": {"included": False, "text": ""},
         "tone": "생활팁",
         "scenes": [
-            {"seq": 1, "stage": "empathy", "narration": "요즘 자꾸 새벽에 깨시나요", "caption": "공감", "image_index": 0, "duration_sec": 8},
-            {"seq": 2, "stage": "emotion", "narration": "낮에도 피곤하고 짜증나셨죠", "caption": "감정", "image_index": 0, "duration_sec": 8},
-            {"seq": 3, "stage": "problem", "narration": "잠을 설치면 하루가 무너져요", "caption": "문제", "image_index": 1, "duration_sec": 8},
-            {"seq": 4, "stage": "solution", "narration": "숙면 루틴이 필요해요", "caption": "해결", "image_index": 1, "duration_sec": 8},
-            {"seq": 5, "stage": "product", "narration": "이 수면 안대로 시작해보세요", "caption": "상품", "image_index": 2, "duration_sec": 8},
+            {"seq": 1, "stage": "empathy", "situation": "situation_hook", "narration": "요즘 자꾸 새벽에 깨시나요", "caption": "공감", "image_index": 0, "duration_sec": 8},
+            {"seq": 2, "stage": "emotion", "situation": "situation_hook", "narration": "낮에도 피곤하고 짜증나셨죠", "caption": "감정", "image_index": 0, "duration_sec": 8},
+            {"seq": 3, "stage": "problem", "situation": "situation_analysis", "narration": "잠을 설치면 하루가 무너져요", "caption": "문제", "image_index": 1, "duration_sec": 8},
+            {"seq": 4, "stage": "solution", "situation": "situation_usage", "narration": "숙면 루틴이 필요해요", "caption": "해결", "image_index": 1, "duration_sec": 8},
+            {"seq": 5, "stage": "product", "situation": "situation_cta", "narration": "이 수면 안대로 시작해보세요", "caption": "상품", "image_index": 2, "duration_sec": 8},
         ],
         "disclosure": PARTNERS_DISCLOSURE,
         "estimated_duration_sec": 40,
@@ -92,6 +92,24 @@ def test_scene_missing_valid_stage_rejected():
     with pytest.raises(ScriptValidationError) as exc:
         validate_script(script, reviews_raw="", needs_education=False)
     assert any("stage" in e for e in exc.value.errors)
+
+
+def test_scene_missing_valid_situation_rejected():
+    # situation은 stage와 별개로 형식(tone)과 무관하게 항상 같은 5개 값 중 하나여야
+    # 이미지 생성 스타일 프리셋(SITUATION_STYLE_PRESETS) 매칭이 가능하다.
+    script = _base_script()
+    script["scenes"][0]["situation"] = "hook"  # 5개 값 형식이 아님 (situation_ 접두사 누락)
+    with pytest.raises(ScriptValidationError) as exc:
+        validate_script(script, reviews_raw="", needs_education=False)
+    assert any("situation" in e for e in exc.value.errors)
+
+
+def test_scene_missing_situation_field_rejected():
+    script = _base_script()
+    del script["scenes"][0]["situation"]
+    with pytest.raises(ScriptValidationError) as exc:
+        validate_script(script, reviews_raw="", needs_education=False)
+    assert any("situation" in e for e in exc.value.errors)
 
 
 def test_duration_out_of_range_rejected():
@@ -245,12 +263,12 @@ def _giphok_script(**overrides) -> dict:
         "educational_note": {"included": False, "text": ""},
         "tone": "기획천재발견형",
         "scenes": [
-            {"seq": 1, "stage": "hook", "narration": "이거 자꾸 손이 가더라고요", "caption": "후킹", "image_index": 0, "duration_sec": 6},
-            {"seq": 2, "stage": "discovery", "narration": "우연히 발견한 물건인데", "caption": "발견", "image_index": 0, "duration_sec": 6},
-            {"seq": 3, "stage": "design_insight", "narration": "이 부분 설계가 진짜 똑똑해요", "caption": "인사이트", "image_index": 1, "duration_sec": 8},
-            {"seq": 4, "stage": "more_details", "narration": "디테일도 곳곳이 다 이런 식이에요", "caption": "디테일", "image_index": 1, "duration_sec": 6},
-            {"seq": 5, "stage": "daily_use", "narration": "매일 쓰다 보니 일상이 편해졌어요", "caption": "일상", "image_index": 2, "duration_sec": 6},
-            {"seq": 6, "stage": "product_cta", "narration": "이 제품 하나면 충분해요", "caption": "상품", "image_index": 2, "duration_sec": 6},
+            {"seq": 1, "stage": "hook", "situation": "situation_hook", "narration": "이거 자꾸 손이 가더라고요", "caption": "후킹", "image_index": 0, "duration_sec": 6},
+            {"seq": 2, "stage": "discovery", "situation": "situation_hook", "narration": "우연히 발견한 물건인데", "caption": "발견", "image_index": 0, "duration_sec": 6},
+            {"seq": 3, "stage": "design_insight", "situation": "situation_analysis", "narration": "이 부분 설계가 진짜 똑똑해요", "caption": "인사이트", "image_index": 1, "duration_sec": 8},
+            {"seq": 4, "stage": "more_details", "situation": "situation_analysis", "narration": "디테일도 곳곳이 다 이런 식이에요", "caption": "디테일", "image_index": 1, "duration_sec": 6},
+            {"seq": 5, "stage": "daily_use", "situation": "situation_usage", "narration": "매일 쓰다 보니 일상이 편해졌어요", "caption": "일상", "image_index": 2, "duration_sec": 6},
+            {"seq": 6, "stage": "product_cta", "situation": "situation_cta", "narration": "이 제품 하나면 충분해요", "caption": "상품", "image_index": 2, "duration_sec": 6},
         ],
         "disclosure": PARTNERS_DISCLOSURE,
         "estimated_duration_sec": 38,

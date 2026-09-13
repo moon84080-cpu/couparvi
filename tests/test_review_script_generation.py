@@ -81,7 +81,19 @@ VALID_SCRIPT = {
     },
     "educational_note": {"included": False, "text": ""},
     "tone": "생활팁",
-    "scenes": [{"seq": 1, "narration": "n", "caption": "c", "image_index": 0, "duration_sec": 5}],
+    "scenes": [
+        {
+            # 나레이션 길이(27자)와 duration_sec(5초)이 초당 5.5자 기준과 정확히 맞아떨어지게
+            # 골랐다 — generate_script()의 duration_sec 자동 재설정(app/script/generator.py의
+            # _normalize_scene_durations, 사용자 피드백 2026-08-19)이 값을 바꾸지 않아야
+            # 이 테스트가 순수하게 "JSON 파싱 결과 그대로 반환"만 검증할 수 있다.
+            "seq": 1,
+            "narration": "이 제품은 정말 만족스러운 선택이었어요 강추합니다",
+            "caption": "c",
+            "image_index": 0,
+            "duration_sec": 5,
+        }
+    ],
     "disclosure": "d",
     "estimated_duration_sec": 40,
     "youtube": {"title": "t", "description": "d", "tags": []},
@@ -98,3 +110,30 @@ def test_generate_script_parses_valid_json():
         client=client,
     )
     assert result == VALID_SCRIPT
+
+
+def test_generate_script_normalizes_mismatched_scene_duration():
+    # LLM이 "초당 5~6글자" 가이드를 못 지켜 나레이션(34자)에 비해 너무 짧은 duration_sec(3초)을
+    # 낸 경우 — 그대로 두면 렌더링에서 속도 clamp로 강제 조정되며 결과가 크게 어긋난다
+    # (사용자 피드백, 2026-08-19, 라이브박스 2세대 대본 실측). generate_script()가 대본
+    # (나레이션) 기준으로 자동 재설정해야 한다.
+    mismatched_script = json.loads(json.dumps(VALID_SCRIPT))
+    mismatched_script["scenes"] = [
+        {
+            "seq": 1,
+            "narration": "야외나 차 안에서 맛있는 에스프레소 진짜 절실할 때 많으셨죠",
+            "caption": "c",
+            "image_index": 0,
+            "duration_sec": 3,
+        }
+    ]
+    client = _FakeClient([json.dumps(mismatched_script, ensure_ascii=False)])
+    result = generate_script(
+        analysis_json=VALID_ANALYSIS,
+        product={"product_name": "테스트 상품", "price": 10000, "category": "가전디지털"},
+        tone="생활팁",
+        needs_education=False,
+        client=client,
+    )
+    assert result["scenes"][0]["duration_sec"] != 3
+    assert result["scenes"][0]["duration_sec"] > 4

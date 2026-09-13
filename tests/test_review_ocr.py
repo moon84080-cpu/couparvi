@@ -1,8 +1,10 @@
 import io
 
+import pytest
 from PIL import Image, ImageDraw
 
-from app.review.ocr import OCR_MAX_UPSCALE, OCR_MIN_DIMENSION_PX, _preprocess_for_ocr
+from app.review import ocr
+from app.review.ocr import OCR_MAX_UPSCALE, OCR_MIN_DIMENSION_PX, ReviewOcrError, _preprocess_for_ocr
 
 
 def _png_bytes(size: tuple[int, int]) -> bytes:
@@ -62,3 +64,130 @@ def test_unparseable_bytes_pass_through_without_crashing():
     result_bytes, media_type = _preprocess_for_ocr(garbage, "image/png")
     assert result_bytes == garbage
     assert media_type == "image/png"
+
+
+# --- OCR_PROVIDER 전환(TTS_PROVIDER와 같은 패턴, 사용자 피드백 2026-08-18) ---
+
+
+class _FakeOpenAIResponse:
+    def __init__(self, status_code=200, json_data=None, text=""):
+        self.status_code = status_code
+        self._json = json_data or {}
+        self.text = text
+
+    def json(self):
+        return self._json
+
+
+class _FakeOpenAIClient:
+    def __init__(self, response):
+        self._response = response
+        self.calls = []
+
+    def post(self, url, headers=None, json=None):
+        self.calls.append({"url": url, "headers": headers, "json": json})
+        return self._response
+
+
+def _png_bytes_small(size=(10, 10)) -> bytes:
+    img = Image.new("RGB", size, "white")
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_extract_review_text_uses_openai_when_provider_is_openai(monkeypatch):
+    monkeypatch.setattr(ocr, "OPENAI_API_KEY", "fake-openai-key")
+    client = _FakeOpenAIClient(
+        _FakeOpenAIResponse(200, {"choices": [{"message": {"content": "추출된 리뷰 텍스트"}}]})
+    )
+
+    result = ocr.extract_review_text(_png_bytes_small(), "image/png", client=client, provider="openai")
+
+    assert result == "추출된 리뷰 텍스트"
+    assert len(client.calls) == 1
+    body = client.calls[0]["json"]
+    assert body["model"] == ocr.OPENAI_MODEL
+    # 이미지가 OpenAI의 image_url(data URI) 형식으로 들어가야 한다(Anthropic의
+    # {"type":"image","source":{...}} 형식과 다르다).
+    image_part = body["messages"][1]["content"][0]
+    assert image_part["type"] == "image_url"
+    assert image_part["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_extract_review_text_openai_requires_api_key(monkeypatch):
+    monkeypatch.setattr(ocr, "OPENAI_API_KEY", "")
+    with pytest.raises(ReviewOcrError, match="OPENAI_API_KEY"):
+        ocr.extract_review_text(_png_bytes_small(), "image/png", provider="openai")
+
+
+def test_extract_review_text_openai_raises_on_http_error(monkeypatch):
+    monkeypatch.setattr(ocr, "OPENAI_API_KEY", "fake-openai-key")
+    monkeypatch.setattr(ocr.time, "sleep", lambda *_a, **_k: None)
+    client = _FakeOpenAIClient(_FakeOpenAIResponse(500, text="server error"))
+
+    with pytest.raises(ReviewOcrError, match="OpenAI 요청 실패"):
+        ocr.extract_review_text(_png_bytes_small(), "image/png", client=client, provider="openai")
+
+
+def test_extract_review_text_rejects_unknown_provider():
+    with pytest.raises(ReviewOcrError, match="OCR_PROVIDER"):
+        ocr.extract_review_text(_png_bytes_small(), "image/png", provider="does-not-exist")
+
+
+# --- OCR_PROVIDER=gemini (claude/openai보다 토큰 단가가 싸서 인식률 검증용으로 추가, 사용자 피드백 2026-08-18) ---
+
+
+class _FakeGeminiClient:
+    def __init__(self, response):
+        self._response = response
+        self.calls = []
+
+    def post(self, url, params=None, json=None):
+        self.calls.append({"url": url, "params": params, "json": json})
+        return self._response
+
+
+def test_extract_review_text_uses_gemini_when_provider_is_gemini(monkeypatch):
+    monkeypatch.setattr(ocr, "GEMINI_API_KEY", "fake-gemini-key")
+    response = _FakeOpenAIResponse(
+        200,
+        {"candidates": [{"content": {"parts": [{"text": "추출된 리뷰 텍스트"}]}}]},
+    )
+    client = _FakeGeminiClient(response)
+
+    result = ocr.extract_review_text(_png_bytes_small(), "image/png", client=client, provider="gemini")
+
+    assert result == "추출된 리뷰 텍스트"
+    assert len(client.calls) == 1
+    call = client.calls[0]
+    assert call["params"] == {"key": "fake-gemini-key"}
+    # inlineData(base64) 형식으로 들어가야 한다(OpenAI의 image_url data URI, Anthropic의
+    # {"type":"image","source":{...}} 형식과 다르다).
+    image_part = call["json"]["contents"][0]["parts"][0]
+    assert "inlineData" in image_part
+    assert image_part["inlineData"]["mimeType"] == "image/png"
+
+
+def test_extract_review_text_gemini_requires_api_key(monkeypatch):
+    monkeypatch.setattr(ocr, "GEMINI_API_KEY", "")
+    with pytest.raises(ReviewOcrError, match="GEMINI_API_KEY"):
+        ocr.extract_review_text(_png_bytes_small(), "image/png", provider="gemini")
+
+
+def test_extract_review_text_gemini_raises_on_http_error(monkeypatch):
+    monkeypatch.setattr(ocr, "GEMINI_API_KEY", "fake-gemini-key")
+    monkeypatch.setattr(ocr.time, "sleep", lambda *_a, **_k: None)
+    client = _FakeGeminiClient(_FakeOpenAIResponse(500, text="server error"))
+
+    with pytest.raises(ReviewOcrError, match="Gemini 요청 실패"):
+        ocr.extract_review_text(_png_bytes_small(), "image/png", client=client, provider="gemini")
+
+
+def test_extract_review_text_gemini_raises_when_no_candidates(monkeypatch):
+    monkeypatch.setattr(ocr, "GEMINI_API_KEY", "fake-gemini-key")
+    monkeypatch.setattr(ocr.time, "sleep", lambda *_a, **_k: None)
+    client = _FakeGeminiClient(_FakeOpenAIResponse(200, {"candidates": []}))
+
+    with pytest.raises(ReviewOcrError, match="candidates"):
+        ocr.extract_review_text(_png_bytes_small(), "image/png", client=client, provider="gemini")

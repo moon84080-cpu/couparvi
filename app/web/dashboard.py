@@ -12,7 +12,14 @@ from fastapi import APIRouter, Form, HTTPException, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from app.config import DEFAULT_FONT_KEY, DEFAULT_HOLD_MINUTES, FONT_LABELS, FONT_REGISTRY, PARTNERS_DISCLOSURE
+from app.config import (
+    DEFAULT_FONT_KEY,
+    DEFAULT_HOLD_MINUTES,
+    FONT_LABELS,
+    FONT_REGISTRY,
+    NAVER_SEARCH_ENABLED,
+    PARTNERS_DISCLOSURE,
+)
 from app.script.formats import active_tone_choices, get_format
 from app.db import get_client
 from app.discovery.education import detect_needs_education
@@ -35,9 +42,12 @@ from app.media.render import (
     HOOK_FONTSIZE,
     STICKY_CTA_FONTSIZE,
     WIDTH,
+    DURATION_MISMATCH_THRESHOLD_SEC,
     RenderError,
+    predict_scene_duration_sec,
     recomposite_captions,
     resolve_font_path,
+    resolve_scene_duration_sec,
     resolve_scene_text_elements,
 )
 from app.media.thumbnail import generate_thumbnail
@@ -50,6 +60,8 @@ from app.upload.publisher import PublishError, publish_video
 from app.web.auth import current_user, sign_in
 from app.web.auth import AuthError
 
+import csv
+import io
 import json
 import os
 import re
@@ -374,6 +386,7 @@ def discover_tab(request: Request, selected: str | None = None, view: str = "lis
             "selected": selected_product,
             "score_cells": _build_score_cells(selected_product) if selected_product else [],
             "latest_review_raw": latest_review_raw,
+            "naver_search_enabled": NAVER_SEARCH_ENABLED,
             "view": view if selected_product else "list",
         }
     )
@@ -418,15 +431,18 @@ def discover_new(request: Request, mode: str = Form(...), value: str = Form(...)
             "status": "scored",
             **breakdown.as_dict(),
         }
-        # 네이버 쇼핑검색으로 대표 이미지를 자동 채움 시도 — 쿠팡과 무관, 실패해도 등록은 계속 진행
-        from app.discovery.naver_search import NaverSearchError, search_product_image
+        # 네이버 쇼핑검색으로 대표 이미지를 자동 채움 시도 — 쿠팡과 무관, 실패해도 등록은 계속 진행.
+        # 네이버 정책 변경으로 이 API가 막혀 NAVER_SEARCH_ENABLED=false인 동안은 아예 호출하지
+        # 않는다(사용자 피드백, 2026-08-17).
+        if NAVER_SEARCH_ENABLED:
+            from app.discovery.naver_search import NaverSearchError, search_product_image
 
-        try:
-            image_result = search_product_image(value)
-            if image_result and image_result.image:
-                row["image_urls"] = [image_result.image]
-        except NaverSearchError:
-            pass
+            try:
+                image_result = search_product_image(value)
+                if image_result and image_result.image:
+                    row["image_urls"] = [image_result.image]
+            except NaverSearchError:
+                pass
     result = client.table("products").insert(row).execute()
     new_id = result.data[0]["id"]
     return RedirectResponse(f"/discover?selected={new_id}&view=detail&toast=상품을+등록했어요", status_code=302)
@@ -463,6 +479,11 @@ def discover_image_candidates(product_id: str, keyword: str):
     실제로 이미지를 내려받아 내용(MD5) 기준으로 중복을 걸러내고, 이미 상품에 추가해둔
     이미지와 내용이 같은 것도 함께 제외한다.
     """
+    if not NAVER_SEARCH_ENABLED:
+        # 네이버 정책 변경으로 쇼핑검색 API가 막혀 한시적으로 비활성화(사용자 피드백,
+        # 2026-08-17) — 프론트도 버튼을 숨기지만, 직접 이 엔드포인트를 호출하는 경우까지 막는다.
+        return JSONResponse({"error": "네이버 이미지 검색이 한시적으로 비활성화되어 있습니다."}, status_code=503)
+
     from app.discovery.naver_search import NaverSearchError, search_product_images
 
     client = get_client()
@@ -698,14 +719,15 @@ def scripts_quick_start(
     if category.strip():
         row["category"] = category.strip()
 
-    from app.discovery.naver_search import NaverSearchError, search_product_image
+    if NAVER_SEARCH_ENABLED:
+        from app.discovery.naver_search import NaverSearchError, search_product_image
 
-    try:
-        image_result = search_product_image(product_name)
-        if image_result and image_result.image:
-            row["image_urls"] = [image_result.image]
-    except NaverSearchError:
-        pass
+        try:
+            image_result = search_product_image(product_name)
+            if image_result and image_result.image:
+                row["image_urls"] = [image_result.image]
+        except NaverSearchError:
+            pass
 
     product_id = client.table("products").insert(row).execute().data[0]["id"]
 
@@ -931,6 +953,11 @@ def prompts_tab(request: Request, selected: str | None = None, view: str = "list
     hook_preview_status = script.get("hook_preview_status")
     scene_previews = script.get("scene_preview_images") or {}
 
+    # duration_sec이 나레이션 길이로 실제 도달 가능한 범위를 DURATION_MISMATCH_THRESHOLD_SEC
+    # 이상 벗어나면 추천값을 같이 보여준다 — 그 이하 오차는 TTS 편차 수준이라 신경 쓰지
+    # 않는다(사용자 피드백, 2026-08-19). 새로 저장되는 씬은 prompts_bulk_fill/prompts_generate가
+    # resolve_scene_duration_sec()으로 미리 재설정하므로, 이 경고는 그 전에 저장된
+    # 구버전 대본에서만 주로 뜬다.
     scene_cards = []
     for scene in scenes:
         seq = scene["seq"]
@@ -946,17 +973,31 @@ def prompts_tab(request: Request, selected: str | None = None, view: str = "list
             status = info.get("status")
             image_path = info.get("image_path")
             video_path = None
+
+        narration = scene.get("narration", "")
+        duration_sec = scene.get("duration_sec")
+        duration_warning = None
+        if duration_sec and narration:
+            predicted_sec = predict_scene_duration_sec(narration, duration_sec)
+            gap_sec = predicted_sec - duration_sec
+            if abs(gap_sec) >= DURATION_MISMATCH_THRESHOLD_SEC:
+                duration_warning = {"recommended_sec": round(predicted_sec, 1), "gap_sec": round(gap_sec, 1)}
+
         scene_cards.append(
             {
                 "seq": seq,
                 "visual": scene.get("visual", ""),
-                "narration": scene.get("narration", ""),
+                "narration": narration,
+                "duration_sec": duration_sec,
+                "duration_warning": duration_warning,
                 "is_hook": is_hook,
+                "is_deleted": bool(scene.get("deleted")),
                 "is_pre_reveal": scene.get("stage") in fmt.pre_reveal_stages,
                 "status": status,
                 "image_path": image_path,
                 "video_path": video_path,
                 "in_progress": in_progress,
+                "job_id": job["id"] if job else None,
                 "error": job.get("error_message") if job and job["status"] == "failed" else None,
                 # 후킹이 아직 확정 안 됐으면 다른 씬은 만들 수 없게 막는다 — 인물 참조를
                 # 항상 후킹 이미지에서만 가져오기 위한 제약(일관성 유지, 사용자 피드백).
@@ -975,6 +1016,155 @@ def prompts_tab(request: Request, selected: str | None = None, view: str = "list
     )
     ctx["script"] = script
     return templates.TemplateResponse("tab_prompts.html", ctx)
+
+
+def _parse_bulk_prompt_paste(text: str) -> list[dict]:
+    """스프레드시트에서 복사한 "단계,오디오,화면연출+자막" 표를 씬별 dict 목록으로 파싱한다.
+
+    사용자 피드백(2026-08-17): 대본을 스프레드시트로 미리 써두고 한 번에 붙여넣고 싶다 —
+    씬 하나하나 타이핑하는 대신, 표를 그대로 붙여넣으면 순서대로 각 씬(나레이션/화면연출/
+    자막/길이)에 채워지길 바람. 구글시트 등에서 복사하면 탭 구분, 사람이 CSV 텍스트를
+    직접 붙이면 콤마 구분이 되므로 첫 줄에 탭이 있는지로 구분자를 정한다. 따옴표로 감싼
+    필드 안의 콤마/줄바꿈은 csv 모듈이 표준 규칙(이중따옴표 이스케이프)대로 처리한다.
+    """
+    text = text.strip()
+    if not text:
+        return []
+    delimiter = "\t" if "\t" in text.splitlines()[0] else ","
+    rows = [row for row in csv.reader(io.StringIO(text), delimiter=delimiter) if any(cell.strip() for cell in row)]
+    if rows and "단계" in rows[0][0]:
+        rows = rows[1:]  # 헤더 행은 건너뛴다
+
+    parsed = []
+    for row in rows:
+        if len(row) < 3:
+            continue
+        stage_col, narration_col, visual_caption_col = row[0], row[1], row[2]
+        duration_match = re.search(r"(\d+)\s*초", stage_col)
+        if "/자막" in visual_caption_col:
+            visual, _, caption = visual_caption_col.partition("/자막")
+            caption = caption.lstrip(": ").strip()
+        else:
+            visual, caption = visual_caption_col, ""
+        parsed.append(
+            {
+                "stage_label": stage_col.strip(),
+                "narration": narration_col.strip(),
+                "visual": visual.strip(),
+                "caption": caption,
+                "duration_sec": int(duration_match.group(1)) if duration_match else None,
+            }
+        )
+    return parsed
+
+
+def _match_stage_key(stage_label: str, position_index: int, row_count: int, fmt) -> str:
+    """붙여넣은 "단계" 칸 텍스트(예: "3. 해결 (10초)")를 이 형식의 실제 stage_key로 매핑한다.
+
+    예전엔 행 순서를 stage_keys 개수에 맞춰 비율로만 분배했는데, 그러면 "해결"(상품이
+    등장해야 하는 행)이 우연히 pre_reveal 단계(예: problem)에 매핑돼 실제 상품 참고사진이
+    빠지고 가짜 상품이 그려지는 문제가 있었다(사용자 피드백, 2026-08-17). 이제 라벨
+    텍스트로 먼저 매칭을 시도하고(CTA/후킹은 특별 취급, 나머지는 형식별 stage.label과
+    비교), 실패하면 예전 방식(비율 분배)으로 안전하게 폴백한다.
+    """
+    normalized = re.sub(r"[\d.\s()초]+", "", stage_label)
+
+    if "CTA" in stage_label.upper() or "마무리" in normalized or "구매유도" in normalized:
+        return fmt.cta_stage
+    if position_index == 0 or "후킹" in normalized or "hook" in stage_label.lower():
+        return fmt.stage_keys[0]
+
+    for stage in fmt.stages:
+        stage_label_clean = stage.label.replace(" ", "")
+        if stage_label_clean and (stage_label_clean in normalized or normalized[:2] == stage_label_clean[:2]):
+            return stage.key
+
+    return fmt.stage_keys[min(len(fmt.stage_keys) - 1, position_index * len(fmt.stage_keys) // row_count)]
+
+
+@router.post("/prompts/{script_id}/bulk-fill")
+def prompts_bulk_fill(request: Request, script_id: str, product_id: str = Form(...), pasted_text: str = Form(...)):
+    """붙여넣은 표를 파싱해 씬 목록 자체를 통째로 새로 만든다.
+
+    예전엔 기존 씬 개수와 붙여넣은 행 개수가 같아야만 채웠는데, AI가 원래 만들어둔 씬
+    개수(예: 7개)와 사람이 붙여넣는 실제 대본의 단계 수(예: 5개)가 다른 경우가 흔해서
+    (사용자 피드백, 2026-08-17) 항상 걸러졌다. 이제는 개수가 달라도 붙여넣은 행 수를
+    그대로 새 씬 개수로 삼아 scenes를 완전히 교체한다. 각 씬의 stage는 이 대본 형식의
+    stage_keys에 행 순서대로 고르게 분배한다(단계 수가 다르면 일부 stage는 씬이 없거나
+    여러 씬이 몰릴 수 있음 — 이미 AI 생성 시에도 "한 단계를 씬 여러 개로 합쳐도 된다"는
+    규칙이 있어 이 앱 전반에서 자연스러운 상황이다).
+
+    스틸컷·후킹 영상은 다시 만들지 않는다 — 텍스트만 갱신하고, 실제 미리보기 생성은
+    사람이 각 씬의 "미리보기 만들기" 버튼을 눌러야 시작되는 기존 흐름을 그대로 따른다.
+    """
+    client = get_client()
+    script = client.table("scripts").select("*").eq("id", script_id).execute().data[0]
+    script_json = script["script_json"]
+
+    parsed_rows = _parse_bulk_prompt_paste(pasted_text)
+    if not parsed_rows:
+        return RedirectResponse(
+            f"/prompts?selected={product_id}&view=detail&toast=붙여넣은+내용을+읽지+못했어요", status_code=302
+        )
+
+    fmt = get_format(script_json.get("tone"))
+    stage_keys = fmt.stage_keys
+    stage_order = {key: idx for idx, key in enumerate(stage_keys)}
+    row_count = len(parsed_rows)
+
+    product = client.table("products").select("image_urls").eq("id", product_id).execute().data
+    image_count = len((product[0].get("image_urls") or []) if product else []) or 1
+
+    new_scenes = []
+    last_idx = -1
+    for i, row in enumerate(parsed_rows):
+        stage = _match_stage_key(row["stage_label"], i, row_count, fmt)
+        idx = stage_order[stage]
+        # 라벨 매칭이 형식의 원래 단계 순서를 거스르면(예: 4번째 행이 1번째 단계로 매칭)
+        # 이전 씬보다 앞선 단계로는 되돌아가지 않게 고정한다 — pre_reveal 판정과 "전체
+        # 컨셉" 카드가 순서를 전제로 하기 때문.
+        if idx < last_idx:
+            idx = last_idx
+            stage = stage_keys[idx]
+        last_idx = idx
+        new_scenes.append(
+            {
+                "seq": i + 1,
+                "stage": stage,
+                "narration": row["narration"],
+                "caption": row["caption"],
+                "visual": row["visual"],
+                "image_index": i % image_count,
+                # 붙여넣은(또는 기본값 5초) 시간이 나레이션 길이와 크게 안 맞으면 대본
+                # (나레이션) 기준으로 자동 재설정한다 — 그대로 두면 렌더링에서 속도 clamp로
+                # 강제 조정되면서 실제 영상 길이가 설정값과 크게 어긋난다(사용자 피드백,
+                # 2026-08-19, app/media/render.py의 resolve_scene_duration_sec 참고).
+                "duration_sec": resolve_scene_duration_sec(row["narration"], row["duration_sec"] or 5),
+            }
+        )
+    script_json["scenes"] = new_scenes
+
+    # structure[key](전체 컨셉 카드에 보이는 stage별 나레이션)도 같은 stage를 가진 씬들의
+    # 나레이션을 이어붙여 함께 갱신한다 — 안 하면 "전체 컨셉" 카드가 옛 텍스트로 남는다.
+    script_json["structure"] = {
+        key: " ".join(s["narration"] for s in new_scenes if s.get("stage") == key) for key in stage_keys
+    }
+
+    client.table("scripts").update(
+        {
+            "script_json": script_json,
+            "version": script["version"] + 1,
+            # 씬 구성 자체가 바뀌었으니 이전에 만들어둔 미리보기(이미지/후킹 영상)는 새
+            # 내용과 안 맞는다 — 그대로 두면 엉뚱한 미리보기가 "완료"로 남아 헷갈린다.
+            "hook_preview_image_path": None,
+            "hook_preview_video_path": None,
+            "hook_preview_status": None,
+            "scene_preview_images": {},
+        }
+    ).eq("id", script_id).execute()
+    return RedirectResponse(
+        f"/prompts?selected={product_id}&view=detail&toast=씬+{row_count}개로+새로+채웠어요", status_code=302
+    )
 
 
 @router.post("/prompts/{script_id}/generate")
@@ -1005,6 +1195,9 @@ async def prompts_generate(request: Request, script_id: str):
         scene["visual"] = form.get("visual", scene.get("visual", ""))
     if "narration" in form:
         scene["narration"] = form.get("narration", scene.get("narration", ""))
+        # 나레이션 길이가 바뀌면 기존 duration_sec이 더 이상 안 맞을 수 있다 — 대본
+        # (나레이션) 기준으로 자동 재설정한다(사용자 피드백, 2026-08-19).
+        scene["duration_sec"] = resolve_scene_duration_sec(scene["narration"], scene.get("duration_sec"))
 
     update_payload = {"script_json": script_json, "version": existing["version"] + 1}
     if is_hook:
@@ -1023,6 +1216,58 @@ async def prompts_generate(request: Request, script_id: str):
         f"/prompts?selected={product_id}&view=detail&toast=미리보기를+만들고+있어요",
         status_code=302,
     )
+
+
+@router.post("/prompts/{script_id}/scenes/{seq}/delete")
+def prompts_delete_scene(request: Request, script_id: str, seq: int, product_id: str = Form(...)):
+    """씬 하나를 "삭제됨"으로 표시한다 — 렌더링에서는 빠지지만 목록에는 흔적이 남는다.
+
+    배열에서 완전히 지우지 않고 scene["deleted"]=True만 표시하는 소프트 삭제다 — 실수로
+    지운 씬이 흔적도 없이 사라지면 안 된다는 요청(사용자 피드백, 2026-08-18). 렌더링
+    (render_script)은 deleted 씬을 걸러내고, 프롬프트 확인 탭은 흐리게 표시만 한다.
+
+    후킹(첫 씬)은 삭제할 수 없다 — 인물 참조 기준점이자 hook_preview_* 필드가 이 씬
+    하나를 전제로 설계돼 있어서, 삭제를 허용하면 구조 전체가 깨진다. 활성 씬이 하나만
+    남은 상태에서도 막는다(대본이 통째로 비어버리면 렌더링이 불가능하다).
+    """
+    client = get_client()
+    script = client.table("scripts").select("*").eq("id", script_id).execute().data[0]
+    script_json = script["script_json"]
+    scenes = script_json.get("scenes") or []
+    active_scenes = [s for s in scenes if not s.get("deleted")]
+
+    if len(active_scenes) <= 1:
+        return RedirectResponse(
+            f"/prompts?selected={product_id}&view=detail&toast=씬이+하나뿐이라+삭제할+수+없어요", status_code=302
+        )
+    if scenes[0]["seq"] == seq:
+        return RedirectResponse(
+            f"/prompts?selected={product_id}&view=detail&toast=후킹(첫+장면)은+삭제할+수+없어요", status_code=302
+        )
+
+    for s in scenes:
+        if s["seq"] == seq:
+            s["deleted"] = True
+
+    # structure(전체 컨셉 카드)도 갱신 — 삭제된 씬의 나레이션이 이어붙은 채 남지 않게.
+    fmt = get_format(script_json.get("tone"))
+    active_scenes = [s for s in scenes if not s.get("deleted")]
+    script_json["structure"] = {
+        key: " ".join(s["narration"] for s in active_scenes if s.get("stage") == key) for key in fmt.stage_keys
+    }
+
+    # 삭제한 씬의 개별 미리보기 기록도 함께 정리한다.
+    scene_previews = dict(script.get("scene_preview_images") or {})
+    scene_previews.pop(str(seq), None)
+
+    client.table("scripts").update(
+        {
+            "script_json": script_json,
+            "scene_preview_images": scene_previews,
+            "version": script["version"] + 1,
+        }
+    ).eq("id", script_id).execute()
+    return RedirectResponse(f"/prompts?selected={product_id}&view=detail&toast=씬을+삭제했어요", status_code=302)
 
 
 @router.post("/prompts/{script_id}/confirm")

@@ -178,6 +178,9 @@ def test_generate_scene_image_includes_character_reference_when_given(monkeypatc
     # 인종이 씬마다 달라지는 문제(사용자 피드백)가 있어 인종/피부톤 유지 지시를 추가했다.
     assert "인종" in parts[0]["text"]
     assert "피부톤" in parts[0]["text"]
+    # 회귀 테스트 — 후킹은 여성으로 생성됐는데 이후 씬에서 남성으로 바뀌는 등 성별이
+    # 씬마다 달라지는 문제(사용자 피드백, 2026-08-18)가 있어 성별 유지 지시를 추가했다.
+    assert "성별" in parts[0]["text"]
 
 
 def test_generate_scene_image_includes_character_reference_without_product_reference(monkeypatch):

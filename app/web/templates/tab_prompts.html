@@ -30,10 +30,34 @@
     <p style="color:var(--text-dim);">이 상품의 대본을 찾을 수 없어요.</p>
     {% else %}
     <h2 style="margin-top:0;">{{ selected.product_name }} — 장면 확인</h2>
-    <p style="color:var(--text-dim);">전체 컨셉과 씬별 화면 연출·나레이션을 확인/수정하고, 스틸컷(후킹은 영상까지)을
-      미리 만들어볼 수 있어요. 후킹부터 먼저 만들어야 다른 씬을 미리 만들 수 있어요(인물이 씬마다 다르게
-      나오지 않도록 항상 후킹 이미지를 기준으로 삼기 때문). 확정하면 지금까지 만든 미리보기 그대로 전체
+    <p style="color:var(--text-dim);">전체 컨셉과 씬별 화면 연출·나레이션을 확인/수정하고, 스틸컷을 미리 만들어볼 수 있어요.
+      후킹부터 먼저 만들어야 다른 씬을 미리 만들 수 있어요(인물이 씬마다 다르게 나오지 않도록 항상 후킹
+      이미지를 기준으로 삼기 때문). 후킹 영상(Veo)은 여기서 만들지 않고 확정 후 실제 렌더링 시 딱 한 번만
+      만들어요 — 실패하면 정지 이미지로 자동 대체돼요. 확정하면 지금까지 만든 미리보기 스틸컷 그대로 전체
       렌더가 시작되고 미디어제작 탭에 나타나요 — 미리보기를 안 만든 씬은 렌더 시점에 평소처럼 새로 생성돼요.</p>
+
+    {% if not selected.image_urls %}
+    <div class="policy-banner" style="border-radius:var(--radius);margin-bottom:18px;">
+      <span>⚠️ 이 상품엔 등록된 사진이 없어요 — 이대로 미리보기를 만들면 실사 장면 대신 2D 그래픽 카드로
+        대체돼요. <a href="/discover?selected={{ selected.id }}&view=detail" style="color:inherit;text-decoration:underline;">상품선택 탭에서 이미지를 먼저 추가</a>하는 걸 권장해요.</span>
+    </div>
+    {% endif %}
+
+    <div class="panel" style="margin-bottom:18px;">
+      <h3 style="margin-top:0;">붙여넣기로 채우기</h3>
+      <p style="color:var(--text-dim);font-size:0.85em;">스프레드시트에서 복사한 표(단계, 오디오, 화면연출+자막 3열)를
+        그대로 붙여넣으면 씬 목록 전체가 붙여넣은 행 수만큼 새로 만들어져요(기존 씬 개수와 달라도 괜찮아요).
+        자막은 "/자막:" 뒤쪽 텍스트로 인식하고, 단계 칸의 "(N초)"는 씬 길이로 반영돼요. 이미 만들어둔
+        미리보기(이미지/후킹 영상)가 있었다면 초기화돼요 — 새 내용으로 다시 만들어야 해요.</p>
+      <form method="post" action="/prompts/{{ script.id }}/bulk-fill" id="bulk-fill-form">
+        <input type="hidden" name="product_id" value="{{ selected.id }}">
+        <div class="card-field">
+          <textarea name="pasted_text" class="script-cell" rows="8"
+            placeholder="단계,오디오 (AI 성우 대사),화면 연출 및 자막 가이드&#10;1. 후킹 (3초),...,..."></textarea>
+        </div>
+        <button class="btn btn-ghost" type="submit">붙여넣은 내용으로 채우기</button>
+      </form>
+    </div>
 
     <div class="panel" style="margin-bottom:18px;">
       <h3 style="margin-top:0;">전체 컨셉</h3>
@@ -50,17 +74,26 @@
     </div>
 
     {% set any_in_progress = scene_cards | selectattr('in_progress') | list | length > 0 %}
-    {% if any_in_progress %}
-    <script>
-      setTimeout(function () { location.reload(); }, 5000);
-    </script>
-    {% endif %}
 
     {% for card in scene_cards %}
+    {% if card.is_deleted %}
+    <div class="panel" style="margin-bottom:18px; opacity:0.45;">
+      <h3 style="margin:0;">삭제된 씬입니다 [{{ card.seq }}]</h3>
+    </div>
+    {% else %}
     <div class="panel" style="margin-bottom:18px;{% if card.is_hook %} border-color:var(--accent);{% endif %}">
-      <h3 style="margin-top:0;">씬 {{ card.seq }}{% if card.is_hook %} · 후킹(첫 장면){% endif %}</h3>
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <h3 style="margin-top:0;">씬 {{ card.seq }}{% if card.is_hook %} · 후킹(첫 장면){% endif %}</h3>
+        {% if not card.is_hook %}
+        <form method="post" action="/prompts/{{ script.id }}/scenes/{{ card.seq }}/delete"
+          onsubmit="return confirm('씬 {{ card.seq }}을(를) 삭제할까요?');">
+          <input type="hidden" name="product_id" value="{{ selected.id }}">
+          <button type="submit" class="list-delete-btn" title="이 씬 삭제">✕</button>
+        </form>
+        {% endif %}
+      </div>
 
-      <form method="post" action="/prompts/{{ script.id }}/generate">
+      <form method="post" action="/prompts/{{ script.id }}/generate" class="scene-generate-form">
         <input type="hidden" name="product_id" value="{{ selected.id }}">
         <input type="hidden" name="target_seq" value="{{ card.seq }}">
         <div class="card-field">
@@ -71,6 +104,18 @@
           <label>나레이션</label>
           <textarea name="narration" class="script-cell" rows="2" {% if card.locked %}disabled{% endif %}>{{ card.narration }}</textarea>
         </div>
+        {% if card.duration_sec %}
+        <p style="color:var(--text-dim);font-size:0.85em;margin:0 0 8px;">씬 길이(설정값): {{ card.duration_sec }}초</p>
+        {% endif %}
+        {% if card.duration_warning %}
+        <div class="policy-banner" style="border-radius:var(--radius);margin-bottom:12px;">
+          <span>⚠️ 나레이션 길이와 설정한 시간({{ card.duration_sec }}초)이 안 맞아요 — 실제 렌더링에서는
+            자연스러운 목소리 속도를 벗어나지 않게 조절되기 때문에 약 {{ card.duration_warning.recommended_sec }}초가
+            될 가능성이 높아요({{ "+" if card.duration_warning.gap_sec > 0 else "" }}{{ card.duration_warning.gap_sec }}초
+            차이). {{ card.duration_warning.recommended_sec }}초에 맞게 나레이션 길이를 조정하거나, 붙여넣기 표의
+            시간 설정을 다시 확인해주세요.</span>
+        </div>
+        {% endif %}
         {% if card.is_pre_reveal %}
         <p style="color:var(--text-dim);font-size:0.85em;">이 장면은 상품이 아직 등장하면 안 되는 단계라 참고 이미지 없이 만들어져요 —
           화면 연출에 상품 등장을 적어도 실제로는 안 나와요.</p>
@@ -82,7 +127,10 @@
       </form>
 
       {% if card.in_progress %}
-      <p style="color:var(--text-dim);margin-top:14px;">🔄 만들고 있어요{% if card.is_hook %} — 영상까지 만드느라 몇 분 걸릴 수 있어요{% endif %}.</p>
+      <div class="preview-progress-wrap" data-job-id="{{ card.job_id }}" style="margin-top:14px;">
+        <p class="preview-progress-text" style="color:var(--text-dim);margin:0;">🔄 만들고 있어요.</p>
+        <div class="preview-progress"><div class="preview-progress-bar"></div></div>
+      </div>
       {% elif card.status == 'failed' %}
       <div class="empty-banner" style="margin-top:14px;">생성에 실패했어요{% if card.error %}: {{ card.error[:200] }}{% endif %}. 다시 시도해주세요.</div>
       {% elif card.status == 'done' %}
@@ -99,6 +147,7 @@
       <p style="color:var(--text-dim);margin-top:14px;">아직 미리보기가 없어요.</p>
       {% endif %}
     </div>
+    {% endif %}
     {% endfor %}
     {% endif %}
   </div>
@@ -121,4 +170,70 @@
     {% endif %}
   </div>
 </div>
+<script>
+  // 미리보기 완료/실패 감지 후 새로고침하면 스크롤 위치가 맨 위로 튀는 문제(사용자
+  // 피드백, 2026-08-18) — 새로고침 직전에 스크롤 위치를 저장해뒀다가, 새로 로드된
+  // 페이지에서 복원한다. any_in_progress 여부와 무관하게(완료로 폴링이 끝난 뒤의
+  // 새로고침에서는 이 블록이 아예 없을 수 있으므로) 항상 실행돼야 한다.
+  document.addEventListener("DOMContentLoaded", function () {
+    var savedY = sessionStorage.getItem("prompts-scroll-y");
+    if (savedY !== null) {
+      sessionStorage.removeItem("prompts-scroll-y");
+      var targetY = parseInt(savedY, 10) || 0;
+      // 이미지가 계속 로드되면서 페이지 높이가 변하는 동안엔 한 번만 scrollTo 해봐야
+      // 다시 밀린다(사용자 피드백 — 복원이 안 되는 것처럼 보였던 원인) — DOMContentLoaded
+      // 직후, 모든 리소스(이미지 포함) 로드 완료 후, 그리고 약간의 지연 후까지 여러 번
+      // 다시 적용해 최종적으로 자리를 잡게 한다.
+      var restore = function () { window.scrollTo(0, targetY); };
+      restore();
+      window.addEventListener("load", restore);
+      setTimeout(restore, 300);
+      setTimeout(restore, 800);
+    }
+    // "미리보기 만들기" 버튼도 폼 제출(페이지 이동)이라 그 순간에도 스크롤이 튄다 —
+    // 제출 직전에 같은 방식으로 위치를 저장해둔다.
+    document.querySelectorAll(".scene-generate-form").forEach(function (form) {
+      form.addEventListener("submit", function () {
+        sessionStorage.setItem("prompts-scroll-y", String(window.scrollY));
+      });
+    });
+  });
+</script>
+{% if any_in_progress %}
+<script>
+  // 씬 미리보기 생성 진행 상태를 폴링한다 — 예전엔 5초마다 페이지 전체를 새로고침해
+  // 화면이 깜빡였는데(사용자 피드백), 진행 중엔 로딩바만 보여주다가 완료/실패를 감지한
+  // 순간 딱 한 번만 새로고침해 최종 이미지/영상과 버튼 상태를 반영한다.
+  document.addEventListener("DOMContentLoaded", function () {
+    function reloadKeepingScroll() {
+      sessionStorage.setItem("prompts-scroll-y", String(window.scrollY));
+      location.reload();
+    }
+    document.querySelectorAll(".preview-progress-wrap[data-job-id]").forEach(function (wrap) {
+      var jobId = wrap.dataset.jobId;
+      if (!jobId) return;
+      var textEl = wrap.querySelector(".preview-progress-text");
+      var barEl = wrap.querySelector(".preview-progress");
+      var timer = setInterval(function () {
+        fetch("/api/render-jobs/" + jobId)
+          .then(function (r) { return r.json(); })
+          .then(function (job) {
+            if (job.status === "done") {
+              clearInterval(timer);
+              if (barEl) barEl.hidden = true;
+              textEl.textContent = "✅ 완료됐어요!";
+              setTimeout(reloadKeepingScroll, 900);
+            } else if (job.status === "failed") {
+              clearInterval(timer);
+              if (barEl) barEl.hidden = true;
+              textEl.textContent = "생성에 실패했어요" + (job.error_message ? (": " + job.error_message.slice(0, 200)) : "") + ". 다시 시도해주세요.";
+              setTimeout(reloadKeepingScroll, 900);
+            }
+          })
+          .catch(function () {}); // 네트워크 순간 오류는 다음 폴링에서 다시 시도
+      }, 3000);
+    });
+  });
+</script>
+{% endif %}
 {% endblock %}

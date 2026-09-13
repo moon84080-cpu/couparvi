@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 
 from app.config import EDUCATION_FORBIDDEN_KEYWORDS, PARTNERS_DISCLOSURE
-from app.script.formats import all_known_tones, get_format
+from app.script.formats import SITUATION_CHOICES, all_known_tones, get_format
 
 MIN_SCENES = 3
 MAX_SCENES = 8
@@ -96,6 +96,11 @@ def validate_scenes(script_json: dict) -> list[str]:
         stage = scene.get("stage")
         if stage not in fmt.stage_keys:
             errors.append(f"scene {scene.get('seq', '?')}의 stage('{stage}')가 {fmt.stage_keys} 중 하나가 아닙니다.")
+        # situation은 stage와 달리 형식(tone)에 상관없이 항상 같은 5개 값 중 하나다 — 이미지
+        # 생성 스타일 프리셋(app/media/image_generator.py의 SITUATION_STYLE_PRESETS) 매칭에 쓰인다.
+        situation = scene.get("situation")
+        if situation not in SITUATION_CHOICES:
+            errors.append(f"scene {scene.get('seq', '?')}의 situation('{situation}')이 {SITUATION_CHOICES} 중 하나가 아닙니다.")
     return errors
 
 

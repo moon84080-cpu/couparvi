@@ -53,8 +53,13 @@
 
   <div class="panel center-panel">
     <a class="back-to-list" href="/discover">← 목록</a>
-    {% if selected %}
+    <!-- if/else 두 분기 모두 이 div 하나로 감싸야 한다 — 예전엔 if 분기 안에서만 열어서,
+         상품 미선택(else) 상태일 때 아래 공용 </div> 2개가 열린 적 없는 div까지 닫아버려
+         .three-col 그리드 자체가 조기 종료되고 .action-panel(분석 버튼)이 그리드 밖으로
+         빠져나가 화면 아래쪽 전체폭 블록으로 렌더링되는 버그가 있었다(사용자 피드백,
+         2026-08-18). -->
     <div class="card-field">
+    {% if selected %}
 
 
       <form id="analyze-form" method="post" action="/discover/{{ selected.id }}/analyze">
@@ -132,6 +137,41 @@
             required>{{ latest_review_raw }}</textarea>
         </div>
         <script>
+          (function () {
+            // 이미지 업로드/추가/삭제는 각각 별도 <form>이라 제출 시 페이지 전체가
+            // 새로고침되는데, 그때 리뷰 텍스트가 아직 "분석하기"로 저장되기 전이면 서버가
+            // 돌려주는 latest_review_raw(DB에 저장된 값)로 덮어써져 방금 붙여넣은/추출한
+            // 텍스트가 사라진다(사용자 피드백, 2026-08-19). 세션스토리지에 임시 저장해뒀다가
+            // 새로고침 후 복원하고, 실제로 분석하기/분석 및 다음으로 DB에 저장되는 순간에만
+            // 지운다 — 같은 브라우저 세션 안에서는 이미지 등록을 먼저 하든 리뷰를 먼저
+            // 붙이든 순서와 무관하게 텍스트가 유실되지 않는다.
+            var productId = "{{ selected.id }}";
+            var storageKey = "couparvi_reviews_raw_draft_" + productId;
+            var textarea = document.querySelector("textarea[name=reviews_raw]");
+            if (!textarea) return;
+
+            var draft = sessionStorage.getItem(storageKey);
+            if (draft !== null && draft !== textarea.value) {
+              textarea.value = draft;
+            }
+
+            function saveDraft() {
+              sessionStorage.setItem(storageKey, textarea.value);
+            }
+            textarea.addEventListener("input", saveDraft);
+            // 스크린샷 OCR 추출(아래)은 textarea.value를 코드로 직접 바꿔서 input 이벤트가
+            // 뜨지 않는다 — 그 콜백에서 이 함수를 직접 호출해 즉시 저장한다.
+            window.couparviSaveReviewDraft = saveDraft;
+
+            var analyzeForm = document.getElementById("analyze-form");
+            if (analyzeForm) {
+              analyzeForm.addEventListener("submit", function () {
+                sessionStorage.removeItem(storageKey);
+              });
+            }
+          })();
+        </script>
+        <script>
           document.addEventListener("DOMContentLoaded", function () {
             var input = document.getElementById("review-screenshot-input");
             if (!input) return;
@@ -154,6 +194,7 @@
                   if (data.text) {
                     var ta = document.querySelector("textarea[name=reviews_raw]");
                     ta.value = ta.value ? (ta.value + "\n" + data.text) : data.text;
+                    if (window.couparviSaveReviewDraft) window.couparviSaveReviewDraft();
                   } else if (data.error) {
                     alert("텍스트 추출에 실패했어요: " + data.error);
                   } else {
@@ -180,104 +221,113 @@
             </label>
             <input type="file" id="review-screenshot-input" accept="image/*" hidden>
           </div>
-          <div class="image-section">
-            <div class="section-label-row">
-              <label class="section-title section-title-lg">상품 이미지</label>
-              <span class="info-icon" tabindex="0">?
-                <span class="info-tooltip">
-                  영상 씬마다 이 이미지들을 순서대로 재사용해요. 여러 장 등록해두면 영상이 한 사진만 반복되지 않아요.
-                </span>
-              </span>
-              <button type="button" class="btn btn-ghost btn-sm btn-naver image-action-btn-first"
-                id="naver-image-search-btn" data-keyword="{{ selected.product_name or '' }}">
-                <span class="btn-label">네이버에서 더 찾기</span>
-                <span class="btn-spinner" hidden></span>
-              </button>
-              <form method="post" action="/discover/{{ selected.id }}/images/upload" enctype="multipart/form-data"
-                id="image-upload-form">
-                <label class="btn btn-ghost btn-sm image-upload-btn" for="image-upload-input">
-                  <span class="btn-label">직접 업로드</span>
-                </label>
-                <input type="file" name="file" id="image-upload-input" accept="image/*" hidden>
-              </form>
-            </div>
-            <div class="image-source-row">
-
-              <div class="image-gallery">
-                {% for url in (selected.image_urls or []) %}
-                <div class="image-gallery-item">
-                  <img src="{{ url }}" alt="">
-                  <form method="post" action="/discover/{{ selected.id }}/images/remove">
-                    <input type="hidden" name="image_url" value="{{ url }}">
-                    <button type="submit" class="image-remove-btn" title="삭제">×</button>
-                  </form>
-                </div>
-                {% endfor %}
-              </div>
-            </div>
-            <div class="image-candidates-grid" id="image-candidates-grid" hidden></div>
-          </div>
-        </div>
-        <script>
-          document.getElementById("image-upload-input").addEventListener("change", function (e) {
-            if (e.target.files[0]) e.target.form.requestSubmit();
-          });
-          document.getElementById("naver-image-search-btn").addEventListener("click", function () {
-            var btn = this;
-            var keyword = btn.dataset.keyword;
-            var grid = document.getElementById("image-candidates-grid");
-            var label = btn.querySelector(".btn-label");
-            var spinner = btn.querySelector(".btn-spinner");
-            label.textContent = "찾는 중...";
-            spinner.hidden = false;
-            btn.disabled = true;
-            fetch("/discover/{{ selected.id }}/image-candidates?keyword=" + encodeURIComponent(keyword))
-              .then(function (res) { return res.json(); })
-              .then(function (data) {
-                grid.innerHTML = "";
-                if (data.error || !data.candidates || !data.candidates.length) {
-                  grid.innerHTML = "<p class=\"empty-banner\">검색 결과를 찾지 못했어요.</p>";
-                } else {
-                  data.candidates.forEach(function (c) {
-                    var form = document.createElement("form");
-                    form.method = "post";
-                    form.action = "/discover/{{ selected.id }}/images/add";
-                    form.className = "image-candidate-item";
-                    var img = document.createElement("img");
-                    img.src = c.image;
-                    var hidden = document.createElement("input");
-                    hidden.type = "hidden";
-                    hidden.name = "image_url";
-                    hidden.value = c.image;
-                    var addBtn = document.createElement("button");
-                    addBtn.type = "submit";
-                    addBtn.className = "btn btn-ghost image-candidate-add";
-                    addBtn.textContent = "추가";
-                    form.appendChild(img);
-                    form.appendChild(hidden);
-                    form.appendChild(addBtn);
-                    grid.appendChild(form);
-                  });
-                }
-                grid.hidden = false;
-              })
-              .catch(function () {
-                grid.innerHTML = "<p class=\"empty-banner\">검색 중 오류가 발생했어요.</p>";
-                grid.hidden = false;
-              })
-              .finally(function () {
-                label.textContent = "네이버에서 더 찾기";
-                spinner.hidden = true;
-                btn.disabled = false;
-              });
-          });
-        </script>
 
         <label class="label-emphasis">🔗 딥링크</label>
         <input type="text" name="deeplink" value="{{ selected.deeplink or '' }}"
           placeholder="쿠팡 파트너스에서 생성한 딥링크 URL (수동 등록 상품은 직접 입력)">
     </div>
     </form>
+
+    <!-- 이미지 업로드/삭제는 각각 자기 자신의 <form>이 필요해서, analyze-form 안에 두면
+         HTML이 form 중첩을 허용하지 않아 파일 입력의 form 소유권이 바깥 analyze-form으로
+         잘못 넘어가 "직접 업로드"가 실제로는 /analyze로 제출되는 문제가 있었다(사용자
+         피드백, 2026-08-18). analyze-form 밖으로 분리한다. -->
+    <div class="card-field">
+      <div class="image-section">
+        <div class="section-label-row">
+          <label class="section-title section-title-lg">상품 이미지</label>
+          <span class="info-icon" tabindex="0">?
+            <span class="info-tooltip">
+              영상 씬마다 이 이미지들을 순서대로 재사용해요. 여러 장 등록해두면 영상이 한 사진만 반복되지 않아요.
+            </span>
+          </span>
+          {% if naver_search_enabled %}
+          <button type="button" class="btn btn-ghost btn-sm btn-naver image-action-btn-first"
+            id="naver-image-search-btn" data-keyword="{{ selected.product_name or '' }}">
+            <span class="btn-label">네이버에서 더 찾기</span>
+            <span class="btn-spinner" hidden></span>
+          </button>
+          {% endif %}
+          <form method="post" action="/discover/{{ selected.id }}/images/upload" enctype="multipart/form-data"
+            id="image-upload-form">
+            <label class="btn btn-ghost btn-sm image-upload-btn" for="image-upload-input">
+              <span class="btn-label">직접 업로드</span>
+            </label>
+            <input type="file" name="file" id="image-upload-input" accept="image/*" hidden>
+          </form>
+        </div>
+        <div class="image-source-row">
+
+          <div class="image-gallery">
+            {% for url in (selected.image_urls or []) %}
+            <div class="image-gallery-item">
+              <img src="{{ url }}" alt="">
+              <form method="post" action="/discover/{{ selected.id }}/images/remove">
+                <input type="hidden" name="image_url" value="{{ url }}">
+                <button type="submit" class="image-remove-btn" title="삭제">×</button>
+              </form>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+        <div class="image-candidates-grid" id="image-candidates-grid" hidden></div>
+      </div>
+    </div>
+    <script>
+      document.getElementById("image-upload-input").addEventListener("change", function (e) {
+        if (e.target.files[0]) e.target.form.requestSubmit();
+      });
+      var naverSearchBtn = document.getElementById("naver-image-search-btn");
+      if (naverSearchBtn) naverSearchBtn.addEventListener("click", function () {
+        var btn = this;
+        var keyword = btn.dataset.keyword;
+        var grid = document.getElementById("image-candidates-grid");
+        var label = btn.querySelector(".btn-label");
+        var spinner = btn.querySelector(".btn-spinner");
+        label.textContent = "찾는 중...";
+        spinner.hidden = false;
+        btn.disabled = true;
+        fetch("/discover/{{ selected.id }}/image-candidates?keyword=" + encodeURIComponent(keyword))
+          .then(function (res) { return res.json(); })
+          .then(function (data) {
+            grid.innerHTML = "";
+            if (data.error || !data.candidates || !data.candidates.length) {
+              grid.innerHTML = "<p class=\"empty-banner\">검색 결과를 찾지 못했어요.</p>";
+            } else {
+              data.candidates.forEach(function (c) {
+                var form = document.createElement("form");
+                form.method = "post";
+                form.action = "/discover/{{ selected.id }}/images/add";
+                form.className = "image-candidate-item";
+                var img = document.createElement("img");
+                img.src = c.image;
+                var hidden = document.createElement("input");
+                hidden.type = "hidden";
+                hidden.name = "image_url";
+                hidden.value = c.image;
+                var addBtn = document.createElement("button");
+                addBtn.type = "submit";
+                addBtn.className = "btn btn-ghost image-candidate-add";
+                addBtn.textContent = "추가";
+                form.appendChild(img);
+                form.appendChild(hidden);
+                form.appendChild(addBtn);
+                grid.appendChild(form);
+              });
+            }
+            grid.hidden = false;
+          })
+          .catch(function () {
+            grid.innerHTML = "<p class=\"empty-banner\">검색 중 오류가 발생했어요.</p>";
+            grid.hidden = false;
+          })
+          .finally(function () {
+            label.textContent = "네이버에서 더 찾기";
+            spinner.hidden = true;
+            btn.disabled = false;
+          });
+      });
+    </script>
     <script>
       document.getElementById("analyze-form").addEventListener("submit", function (e) {
         var clicked = e.submitter;
@@ -306,8 +356,9 @@
     <div class="empty-banner">왼쪽 목록에서 상품을 선택해주세요.</div>
     {% endif %}
   </div>
+  </div>
 
-  <div class="action-panel">
+  <div class="panel action-panel">
     <button class="btn btn-ghost" type="submit" form="analyze-form" name="next" value="false" id="analyze-only-btn"
       data-loading-text="분석하는 중..." {% if not selected %}disabled{% endif %}>
       <span class="btn-label">분석하기</span>

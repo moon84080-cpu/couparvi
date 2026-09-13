@@ -2,13 +2,17 @@
 
 render_jobs.kind로 세 종류를 구분한다:
 - 'full'(기본값): 전체 렌더. queued -> generating_images -> generating_video ->
-  generating_audio -> assembling -> done/failed (process_render_job).
-- 'hook_preview': 씬 확인 단계 — `target_seq`(null이면 후킹/scenes[0]) 씬의 스틸컷(후킹이면
-  영상까지)만 만들어 scripts 테이블에 저장한다. queued -> generating_images ->
-  (후킹이면 generating_video ->) done/failed (process_hook_preview_job).
+  generating_audio -> assembling -> done/failed (process_render_job). 후킹 Veo 호출은
+  여기서 딱 한 번만 일어난다(hook_preview는 더 이상 Veo를 안 쓴다) — 실패하면 정지
+  이미지+Ken Burns로 자동 폴백한다.
+- 'hook_preview': 씬 확인 단계 — `target_seq`(null이면 후킹/scenes[0]) 씬의 스틸컷만
+  만들어 scripts 테이블에 저장한다(2026-08-17부터 후킹도 이미지만, Veo 영상은 안 만든다
+  — 확인 단계에서 반복 재생성할 때 Veo 하루 호출 한도를 가장 빨리 태우는 지점이었다).
+  queued -> generating_images -> done/failed (process_hook_preview_job).
 - 'hook_patch': 이미 완료된 render_job의 씬 하나(`target_seq`, null이면 후킹)만 다시 만든다.
   queued -> generating_images -> (후킹이면 generating_video ->) assembling -> done/failed
-  (process_hook_patch_job).
+  (process_hook_patch_job). 후킹 패치는 사람이 명시적으로 누르는 저빈도 동작이라 Veo를
+  그대로 시도하되, 실패하면 정지 이미지로 폴백한다.
 
 후킹이 아닌 씬을 다루는 두 함수 모두, 인물 참조(character_ref)는 반드시 이미 확정된
 후킹 이미지에서만 가져온다 — 씬마다 다른 사람으로 바뀌는 문제(사용자 피드백)를 막기 위해
@@ -17,6 +21,7 @@ render_jobs.kind로 세 종류를 구분한다:
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import time
@@ -47,6 +52,8 @@ from app.media.tts import TTSError, synthesize_script_audio
 from app.media.video_generator import VideoGenerationError, generate_scene_video
 from app.script.formats import get_format
 
+logger = logging.getLogger(__name__)
+
 WORK_ROOT_DEFAULT = "renders"
 # 씬(단락)이 곧바로 이어져 나레이션이 부자연스럽던 문제 — 각 씬 사이에 숨 고를 무음
 # 구간을 넣는다. 크로스페이드 전환 시간(TRANSITION_DURATION_SEC=0.4)보다 커야 실제
@@ -56,6 +63,22 @@ SCENE_GAP_SEC = 1.0
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+INDEPENDENT_CHARACTER_MARKER = "[다른인물]"
+
+
+def _scene_wants_independent_character(scene: dict) -> bool:
+    """씬의 visual에 "[다른인물]" 표시가 있으면 후킹 인물 참조를 강제하지 않는다.
+
+    인물 일관성 참조(character_reference)는 "정확히 이 사람이어야 한다"는 강한 지시와
+    함께 넘어가기 때문에, 특정 씬만 의도적으로 다른 사람(예: 다른 성별)으로 연출하고
+    싶어도 씬 텍스트에 "남성"이라고 적는 것만으로는 참조 이미지(예: 여성 후킹)와 계속
+    충돌해 뜻대로 안 나온다(사용자 피드백, 2026-08-18 — 등 닦는 장면을 남성 전용으로
+    바꾸려 했으나 여성 참조가 계속 우선됨). 이 표시가 있으면 그 씬만 참조 없이 독립적으로
+    생성해 충돌을 없앤다.
+    """
+    return INDEPENDENT_CHARACTER_MARKER in (scene.get("visual") or "")
 
 
 def _scene_uses_educational_graphic(scene_narration: str, educational_note_text: str) -> bool:
@@ -116,11 +139,18 @@ def build_scene_image(
                 product.get("product_name", ""),
                 product_reference=product_reference,
                 character_reference=character_ref,
+                category=category,
+                situation=scene.get("situation"),
             )
             if character_ref is None:
                 character_ref = (image_bytes, media_type)
             composed = compose_scene_image(image_bytes)
-        except ImageGenerationError:
+        except ImageGenerationError as exc:
+            # 실패 사유를 반드시 로그로 남긴다 — 예전엔 여기서 조용히 넘어가서, Gemini가
+            # 실제로 왜 실패했는지 전혀 알 수 없이 "체크마크 그래픽이 뜬다"는 미스터리만
+            # 남았다(사용자 피드백, 2026-08-18). 폴백 자체(2D 그래픽/원본 사진)는 안전한
+            # 동작이라 그대로 유지한다 — 원인 추적만 가능하게 한다.
+            logger.warning("씬 %s 이미지 생성 실패, 폴백으로 대체: %s", scene.get("seq"), exc)
             if is_pre_reveal:
                 # 생성 실패 폴백으로 실사 상품 사진을 쓰면 광고 대상 상품이 "문제 상황"
                 # 장면에 등장해버리는 원래 문제가 재발한다 — 2D 그래픽 카드로 대신한다.
@@ -132,21 +162,25 @@ def build_scene_image(
     return save_jpeg(composed, path), character_ref
 
 
-def build_scene_video(scene: dict, image_path: str, work_dir: str) -> str | None:
+def build_scene_video(scene: dict, image_path: str, work_dir: str) -> str:
     """이미 만든 씬 스틸컷(image_path)을 시작 프레임으로 Veo 영상을 생성해 저장한다.
 
-    실패하면(시간 초과, API 오류 등) None을 반환한다 — 호출부가 기존 정지 이미지+Ken Burns
-    방식으로 폴백한다. 몇 분씩 걸릴 수 있는 작업 전체를 재시도하면 렌더링이 너무 오래 걸려서
-    generate_scene_video 자체엔 재시도가 없다. 어느 씬에 적용할지는 호출부(render_script)가
-    정한다 — 정지 사진+팬만으로는 일부 씬이 어색해 보인다는 피드백으로, 우선 임팩트가 가장
-    큰 후킹(첫 씬)에만 시범 적용하기로 했다(사용자와 논의해 범위 확정).
+    실패하면(시간 초과, API 오류 등) VideoGenerationError를 그대로 전파한다 — 예전엔 여기서
+    삼켜서 None을 반환했는데, 그러면 호출부가 남기는 실패 사유가 "후킹 영상 생성에
+    실패했습니다(Veo)."처럼 뭉뚱그려져 실제 원인(Veo 응답/상태코드)을 알 수 없었다(사용자
+    피드백, 2026-08-17). 후킹 확인/재생성(process_hook_preview_job, process_hook_patch_job)은
+    이 예외를 그대로 render_jobs.error_message에 남기고, 정지 이미지 폴백이 필요한
+    render_script()의 일반 렌더 경로만 호출부에서 이 예외를 잡아 흡수한다.
     """
     with open(image_path, "rb") as f:
         image_bytes = f.read()
-    try:
-        video_bytes = generate_scene_video(image_bytes, "image/jpeg", scene.get("visual", ""), scene.get("narration", ""))
-    except VideoGenerationError:
-        return None
+    video_bytes = generate_scene_video(
+        image_bytes,
+        "image/jpeg",
+        scene.get("visual", ""),
+        scene.get("narration", ""),
+        duration_sec=scene.get("duration_sec"),
+    )
     path = os.path.join(work_dir, f"scene_{scene['seq']}.mp4")
     with open(path, "wb") as f:
         f.write(video_bytes)
@@ -182,7 +216,10 @@ def render_script(
     """
     os.makedirs(work_dir, exist_ok=True)
     font = font_path or resolve_font_path()
-    scenes = script_json["scenes"]
+    # "삭제됨"으로 표시된 씬(프롬프트 확인 탭의 소프트 삭제)은 실제 렌더링에서 제외한다 —
+    # 목록에는 흔적을 남기고 싶지만 최종 영상에는 들어가면 안 된다는 요청(사용자 피드백,
+    # 2026-08-18).
+    scenes = [s for s in script_json["scenes"] if not s.get("deleted")]
     last_seq = scenes[-1]["seq"]
     first_seq = scenes[0]["seq"]
     fmt = get_format(script_json.get("tone"))
@@ -195,14 +232,18 @@ def render_script(
     scenes_to_build = scenes
 
     if hook_preview:
+        # 스틸컷은 확인 단계에서 확정된 걸 그대로 재사용한다(Gemini 재호출 없음) — 영상은
+        # 별개다. hook_preview는 더 이상 Veo를 만들지 않으므로(2026-08-17~) video_path는
+        # 보통 없고, 아래에서 이번 렌더링 때 딱 한 번 새로 만든다.
         hook_image_path = os.path.join(work_dir, f"scene_{first_seq}.jpg")
         shutil.copy(hook_preview["image_path"], hook_image_path)
         image_paths[first_seq] = hook_image_path
         with open(hook_image_path, "rb") as f:
             character_ref = (f.read(), "image/jpeg")
-        hook_video_path = os.path.join(work_dir, f"scene_{first_seq}.mp4")
-        shutil.copy(hook_preview["video_path"], hook_video_path)
-        video_paths[first_seq] = hook_video_path
+        if hook_preview.get("video_path"):
+            hook_video_path = os.path.join(work_dir, f"scene_{first_seq}.mp4")
+            shutil.copy(hook_preview["video_path"], hook_video_path)
+            video_paths[first_seq] = hook_video_path
         scenes_to_build = scenes[1:]
 
     for scene in scenes_to_build:
@@ -216,20 +257,28 @@ def render_script(
             if character_ref is None:
                 with open(path, "rb") as f:
                     character_ref = (f.read(), "image/jpeg")
+        elif _scene_wants_independent_character(scene):
+            # 이 씬의 생성 결과가 이후 씬들의 character_ref로 이어지면 안 된다 — 반환값을
+            # 바깥 character_ref에 대입하지 않는다.
+            path, _ = build_scene_image(scene, product, script_json, work_dir, character_ref=None)
         else:
             path, character_ref = build_scene_image(scene, product, script_json, work_dir, character_ref)
         image_paths[seq] = path
 
     # 후킹(첫 씬)만 시범적으로 실제 영상(Veo)으로 애니메이션한다 — 몇 분 걸릴 수 있어 별도
-    # 상태 단계로 알린다. 실패하면 video_paths에 안 담기고, 아래 조립 루프가 기존 정지
-    # 이미지+Ken Burns 방식으로 자동 폴백한다.
+    # 상태 단계로 알린다. hook_preview 단계에서 이미 만들어둔 영상이 있으면(과거 데이터,
+    # 또는 hook_patch로 별도 확정한 경우) 그걸 재사용하고, 없으면 여기서 딱 한 번만 새로
+    # 만든다. 실패하면 video_paths에 안 담기고, 아래 조립 루프가 기존 정지 이미지+Ken
+    # Burns 방식으로 자동 폴백한다 — Veo 하루 호출 한도 소진 시에도 렌더링 자체는 멈추지
+    # 않는다(사용자 피드백, 2026-08-17).
     if status_callback:
         status_callback("generating_video")
-    if not hook_preview:
+    if first_seq not in video_paths:
         first_scene = scenes[0]
-        video_path = build_scene_video(first_scene, image_paths[first_seq], work_dir)
-        if video_path:
-            video_paths[first_seq] = video_path
+        try:
+            video_paths[first_seq] = build_scene_video(first_scene, image_paths[first_seq], work_dir)
+        except VideoGenerationError:
+            pass  # 정지 이미지 + Ken Burns로 폴백 (기존 동작)
 
     if status_callback:
         status_callback("generating_audio")
@@ -326,12 +375,12 @@ def process_render_job(
         active_client.table("render_jobs").update({"status": status}).eq("id", job_id).execute()
 
     hook_preview = None
-    if script.get("hook_preview_status") == "done" and script.get("hook_preview_image_path") and script.get(
-        "hook_preview_video_path"
-    ):
+    if script.get("hook_preview_status") == "done" and script.get("hook_preview_image_path"):
+        # video_path는 없을 수 있다(2026-08-17~ hook_preview는 이미지만 만든다) — 그 경우
+        # render_script()가 이 렌더링 때 Veo를 딱 한 번 호출해 영상을 새로 만든다.
         hook_preview = {
             "image_path": script["hook_preview_image_path"],
-            "video_path": script["hook_preview_video_path"],
+            "video_path": script.get("hook_preview_video_path"),
         }
 
     scene_previews = {
@@ -371,12 +420,17 @@ def process_render_job(
 
 
 def process_hook_preview_job(job_id: str, client=None, work_root: str = WORK_ROOT_DEFAULT) -> dict:
-    """씬 확인 단계 전용 job — 대상 씬의 스틸컷(후킹이면 영상까지)을 만들어 scripts에 저장한다.
+    """씬 확인 단계 전용 job — 대상 씬의 스틸컷을 만들어 scripts에 저장한다.
 
     render_jobs에 kind='hook_preview'로 큐잉되며, 전체 렌더(process_render_job)와 달리
-    TTS/조립 단계 없이 이미지(+후킹이면 영상)만 만든다. `target_seq`(null이면 후킹/scenes[0])
-    로 대상 씬을 정한다:
-    - 후킹(scenes[0]): 이미지+Veo 영상까지 만들어 scripts.hook_preview_*에 저장(기존 동작).
+    TTS/조립 단계 없이 이미지만 만든다. `target_seq`(null이면 후킹/scenes[0])로 대상 씬을
+    정한다:
+    - 후킹(scenes[0]): 이미지만 만들어 scripts.hook_preview_image_path에 저장한다 — 예전엔
+      여기서 Veo 영상까지 함께 만들었는데, "확인 단계에서 여러 번 다시 만들어보는" 이
+      루프가 Veo의 하루 호출 한도(RPD)를 가장 빨리 태우는 지점이었다(사용자 피드백,
+      2026-08-17: Veo RPD 10/10 소진으로 재생성이 계속 실패). Veo 호출은 이제
+      render_script()에서 실제 최종 렌더링 시 딱 한 번만 일어난다 — 그때도 실패하면
+      정지 이미지+Ken Burns로 자동 폴백한다(build_scene_video 호출부 참고).
     - 그 외 씬: 이미지만 만들어 scripts.scene_preview_images[seq]에 저장. character_ref는
       반드시 이미 확정된 후킹 이미지(scripts.hook_preview_image_path)에서 고정해 넘긴다 —
       씬마다 다른 사람처럼 바뀌는 문제(사용자 피드백)를 막기 위해, 다른 씬 이미지에서
@@ -421,14 +475,10 @@ def process_hook_preview_job(job_id: str, client=None, work_root: str = WORK_ROO
 
         if is_hook:
             image_path, _ = build_scene_image(scene, product, script_json, work_dir, character_ref=None)
-            active_client.table("render_jobs").update({"status": "generating_video"}).eq("id", job_id).execute()
-            video_path = build_scene_video(scene, image_path, work_dir)
-            if not video_path:
-                raise RenderError("후킹 영상 생성에 실패했습니다(Veo).")
             active_client.table("scripts").update(
                 {
                     "hook_preview_image_path": image_path,
-                    "hook_preview_video_path": video_path,
+                    "hook_preview_video_path": None,
                     "hook_preview_status": "done",
                 }
             ).eq("id", script_id).execute()
@@ -436,6 +486,8 @@ def process_hook_preview_job(job_id: str, client=None, work_root: str = WORK_ROO
             character_ref = _load_hook_character_ref(script)
             if character_ref is None:
                 raise RenderError("먼저 후킹(첫 장면) 미리보기를 완료해야 다른 장면을 만들 수 있습니다.")
+            if _scene_wants_independent_character(scene):
+                character_ref = None
             image_path, _ = build_scene_image(scene, product, script_json, work_dir, character_ref=character_ref)
             _update_scene_preview(active_client, script, scene["seq"], {"image_path": image_path, "status": "done"})
 
@@ -531,15 +583,19 @@ def process_hook_patch_job(job_id: str, client=None, work_root: str = WORK_ROOT_
         if is_hook:
             image_path, _ = build_scene_image(target_scene, product, script_json, source_work_dir, character_ref=None)
             active_client.table("render_jobs").update({"status": "generating_video"}).eq("id", job_id).execute()
-            video_path = build_scene_video(target_scene, image_path, source_work_dir)
-            if not video_path:
-                raise RenderError("후킹 영상 생성에 실패했습니다(Veo).")
+            try:
+                video_path = build_scene_video(target_scene, image_path, source_work_dir)
+            except VideoGenerationError:
+                video_path = None  # 정지 이미지로 폴백 — Veo 한도 소진 시에도 패치 자체는 완료시킨다
         else:
-            hook_image_path = os.path.join(source_work_dir, f"scene_{first_seq}.jpg")
-            if not os.path.exists(hook_image_path):
-                raise RenderError("원본 렌더의 후킹 이미지를 찾을 수 없어 인물 일관성을 유지할 수 없습니다.")
-            with open(hook_image_path, "rb") as f:
-                character_ref = (f.read(), "image/jpeg")
+            if _scene_wants_independent_character(target_scene):
+                character_ref = None
+            else:
+                hook_image_path = os.path.join(source_work_dir, f"scene_{first_seq}.jpg")
+                if not os.path.exists(hook_image_path):
+                    raise RenderError("원본 렌더의 후킹 이미지를 찾을 수 없어 인물 일관성을 유지할 수 없습니다.")
+                with open(hook_image_path, "rb") as f:
+                    character_ref = (f.read(), "image/jpeg")
             image_path, _ = build_scene_image(
                 target_scene, product, script_json, source_work_dir, character_ref=character_ref
             )
@@ -550,7 +606,7 @@ def process_hook_patch_job(job_id: str, client=None, work_root: str = WORK_ROOT_
         # 결정적이라 재구성 가능) — TTS를 다시 부르지 않는다.
         audio_filename = f"scene_{target_seq}_sped.mp3" if target_seq == last_seq else f"scene_{target_seq}_padded.mp3"
         audio_path = os.path.join(source_work_dir, audio_filename)
-        if is_hook:
+        if video_path:
             render_video_scene_clip(
                 video_path, audio_path, target_duration, "", old_clip_path, source_work_dir, font_path=font
             )

@@ -26,6 +26,7 @@ import time
 import httpx
 
 from app.config import GEMINI_API_KEY
+from app.media.image_generator import NEGATIVE_FIX
 
 MODEL = "veo-3.1-fast-generate-preview"
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
@@ -35,13 +36,32 @@ SUBMIT_URL = f"{BASE_URL}/models/{MODEL}:predictLongRunning"
 POLL_INTERVAL_SEC = 10
 MAX_POLL_ATTEMPTS = 30  # 최대 5분
 
+# Veo가 지원하는 durationSeconds는 이 3개 값뿐이다(문서: "4"/"6"/"8", 1080p/4k나 참고 이미지
+# 사용 시엔 "8"로 고정). 우리는 단일 시작 프레임(image-to-video)만 쓰고 720p 기본 해상도라
+# 이 제약에 걸리지 않는다.
+_ALLOWED_DURATIONS = (4, 6, 8)
+
 
 class VideoGenerationError(RuntimeError):
     """영상 생성 실패(제출/폴링/다운로드 오류, 시간 초과 포함)를 감싸는 명확한 예외."""
 
 
+def _snap_duration_seconds(duration_sec: float | int | None) -> int:
+    """대본의 duration_sec(대개 3~5초)을 Veo가 받아주는 값(4/6/8)으로 반올림한다.
+
+    예전엔 durationSeconds를 아예 안 보내서 Veo가 기본값인 8초로 고정 생성했다 — 대본이
+    "4초"를 의도한 씬도 실제로는 8초짜리 영상이 나와, 같은 동작(예: 한숨)이 여러 번
+    반복되는 문제(사용자 피드백)가 있었다. 반드시 숫자 타입으로 보내야 한다 — 문자열
+    ("4")로 보내면 Veo가 400 INVALID_ARGUMENT로 거부한다(실제 API 호출로 확인됨).
+    """
+    if not duration_sec:
+        return _ALLOWED_DURATIONS[0]
+    return min(_ALLOWED_DURATIONS, key=lambda d: abs(d - duration_sec))
+
+
 def _build_prompt(visual: str, narration: str) -> str:
     return (
+        f"{NEGATIVE_FIX}\n\n"
         f"참고 이미지를 시작 프레임으로 사용해 아주 미묘하고 절제된 움직임만 있는 짧은 "
         f"영상으로 만들어줘. 상품의 실제 형태·색상·로고·크기 비율은 시작 프레임에 나온 "
         f"그대로 끝까지 유지해줘 — 재생 중에 상품이 실제보다 커지거나 작아지지 않게 하고, "
@@ -52,11 +72,16 @@ def _build_prompt(visual: str, narration: str) -> str:
         f"닫거나 조작하는 동작(어떤 종류의 상품이든 마찬가지), 인물이 팔을 크게 휘젓거나 "
         f"자세를 큰 폭으로 바꾸는 동작, 걷거나 이동하는 동작. 이런 큰 동작은 AI 영상 특유의 "
         f"형태 붕괴·왜곡(할루시네이션)을 일으키기 쉬우니 절대 넣지 마.\n"
+        f"장면 연출에 특정 동작이 한 번만 일어난다고 적혀 있으면(예: 한숨을 한 번 쉰다) 영상"
+        f"전체에서 정확히 한 번만 하고, 그 뒤에는 같은 동작을 반복하지 말고 자연스러운 정지 "
+        f"자세를 유지해줘 — 영상 길이를 채우려고 같은 동작을 여러 번 반복하지 마.\n"
         f"장면 연출: {visual}\n"
         f"장면 맥락(참고용): {narration}\n"
         f"인물이 입을 움직여 말하거나 대사를 하는 것처럼 보이지 않게 해줘 — 입은 다물거나 "
         f"자연스러운 표정만 짓게 하고, 말하는 듯한 입모양·립싱크는 절대 넣지 마.\n"
-        f"세로 방향(9:16) 영상, 사실적인 사진 스타일, 화면에 텍스트를 넣지 마."
+        f"세로 방향(9:16) 영상. 시작 프레임의 스타일(3D 애니메이션 등)을 재생 내내 그대로 "
+        f"유지하고, 화면에 텍스트를 넣지 마.\n\n"
+        f"{NEGATIVE_FIX}"
     )
 
 
@@ -65,6 +90,7 @@ def generate_scene_video(
     image_media_type: str,
     visual: str,
     narration: str,
+    duration_sec: float | int | None = None,
     client: httpx.Client | None = None,
 ) -> bytes:
     """씬 스틸컷을 시작 프레임으로 애니메이션한 mp4 바이트를 반환한다. 실패하면 VideoGenerationError.
@@ -83,7 +109,9 @@ def generate_scene_video(
     last_error: Exception | None = None
     for attempt in range(2):  # 최초 시도 + 재시도 1회 (AGENTS.md 코딩 컨벤션)
         try:
-            return _generate_scene_video_once(active_client, image_bytes, image_media_type, visual, narration)
+            return _generate_scene_video_once(
+                active_client, image_bytes, image_media_type, visual, narration, duration_sec
+            )
         except VideoGenerationError as exc:
             last_error = exc
 
@@ -138,6 +166,7 @@ def _generate_scene_video_once(
     image_media_type: str,
     visual: str,
     narration: str,
+    duration_sec: float | int | None = None,
 ) -> bytes:
     body = {
         "instances": [
@@ -149,7 +178,7 @@ def _generate_scene_video_once(
                 },
             }
         ],
-        "parameters": {"aspectRatio": "9:16"},
+        "parameters": {"aspectRatio": "9:16", "durationSeconds": _snap_duration_seconds(duration_sec)},
     }
 
     submit_res = active_client.post(SUBMIT_URL, params={"key": GEMINI_API_KEY}, json=body)

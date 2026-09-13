@@ -16,8 +16,10 @@ from app.media.render import (
     compute_scene_windows,
     escape_path_for_filter,
     pick_bgm_track,
+    predict_scene_duration_sec,
     recomposite_captions,
     resolve_font_path,
+    resolve_scene_duration_sec,
     resolve_font_path_for_key,
     resolve_scene_text_elements,
     wrap_text_lines,
@@ -195,6 +197,60 @@ def test_calc_narration_speed_falls_back_when_target_missing_or_invalid():
     assert calc_narration_speed(actual_duration_sec=5.0, target_duration_sec=None) == NARRATION_SPEED
     assert calc_narration_speed(actual_duration_sec=5.0, target_duration_sec=0) == NARRATION_SPEED
     assert calc_narration_speed(actual_duration_sec=5.0, target_duration_sec=-1) == NARRATION_SPEED
+
+
+# 실측 회귀 테스트(사용자 피드백, 2026-08-19) — "라이브박스 2세대" 대본에서 씬별로 설정한
+# duration_sec과 실제 렌더링 결과가 최대 63% 차이 났는데 사용자가 미리 알 방법이 없었다.
+# predict_scene_duration_sec()는 나레이션 글자 수로 자연스러운 발화 길이를 추정해 같은
+# clamp를 미리 적용함으로써, 렌더링 전에 이 차이를 예측할 수 있어야 한다.
+
+
+def test_predict_scene_duration_sec_flags_target_much_shorter_than_natural_pace():
+    # 34자를 3초에 (초당 11.3자 — AI 생성 기준 초당 5~6자보다 훨씬 빠름) 요청한 씬.
+    # 실측: 실제 렌더링에서 3초 목표가 4.89초로 나왔다(요청 대비 +63%).
+    narration = "야외나 차 안에서 맛있는 에스프레소 진짜 절실할 때 많으셨죠?"
+    predicted = predict_scene_duration_sec(narration, target_duration_sec=3)
+    assert predicted > 4.0  # 목표(3초)보다 1초 이상 길게 예측돼야 경고 대상이 된다
+
+
+def test_predict_scene_duration_sec_flags_target_much_longer_than_natural_pace():
+    # 20자를 5초에 (초당 4자 — 너무 느긋함) 요청한 씬.
+    # 실측: 실제 렌더링에서 5초 목표가 3.08초로 나왔다(요청 대비 -38%).
+    narration = "제품 정보는 고정 댓글을 확인하세요!"
+    predicted = predict_scene_duration_sec(narration, target_duration_sec=5)
+    assert predicted < 4.0  # 목표(5초)보다 1초 이상 짧게 예측돼야 경고 대상이 된다
+
+
+def test_predict_scene_duration_sec_matches_target_when_pace_is_natural():
+    # 49자를 7초에 (초당 7자 — AI 생성 기준과 크게 다르지 않음) 요청한 씬은 clamp에 안 걸려야 한다.
+    narration = "캔커피는 미지근하고 밍밍한 데다, 카페 찾아 헤매다 보면 이미 쉬는 시간"
+    predicted = predict_scene_duration_sec(narration, target_duration_sec=7)
+    assert abs(predicted - 7) < 1.0  # 경고 임계값(1초) 미만이어야 한다
+
+
+def test_predict_scene_duration_sec_returns_zero_for_empty_narration():
+    assert predict_scene_duration_sec("", target_duration_sec=5) == 0.0
+
+
+# resolve_scene_duration_sec() — 경고에서 한 걸음 더 나아가, 차이가 크면 대본(나레이션)
+# 기준으로 duration_sec을 자동 재설정한다(사용자 피드백, 2026-08-19).
+
+
+def test_resolve_scene_duration_sec_overrides_when_mismatch_is_large():
+    narration = "야외나 차 안에서 맛있는 에스프레소 진짜 절실할 때 많으셨죠?"
+    resolved = resolve_scene_duration_sec(narration, 3)
+    assert resolved != 3
+    assert resolved > 4
+
+
+def test_resolve_scene_duration_sec_keeps_value_when_mismatch_is_small():
+    narration = "캔커피는 미지근하고 밍밍한 데다, 카페 찾아 헤매다 보면 이미 쉬는 시간"
+    assert resolve_scene_duration_sec(narration, 7) == 7
+
+
+def test_resolve_scene_duration_sec_passes_through_missing_inputs():
+    assert resolve_scene_duration_sec("나레이션", None) is None
+    assert resolve_scene_duration_sec("", 5) == 5
 
 
 def test_pick_bgm_track_returns_none_when_dir_missing(tmp_path):

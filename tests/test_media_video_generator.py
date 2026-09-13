@@ -3,7 +3,12 @@ import subprocess
 import pytest
 
 from app.media import video_generator
-from app.media.video_generator import VideoGenerationError, _validate_video_bytes, generate_scene_video
+from app.media.video_generator import (
+    VideoGenerationError,
+    _snap_duration_seconds,
+    _validate_video_bytes,
+    generate_scene_video,
+)
 
 FFMPEG_AVAILABLE = subprocess.run(["ffmpeg", "-version"], capture_output=True).returncode == 0
 
@@ -79,6 +84,32 @@ def test_generate_scene_video_returns_bytes_on_first_poll():
     sent_body = client.post_calls[0]["json"]
     assert sent_body["instances"][0]["image"]["mimeType"] == "image/jpeg"
     assert sent_body["parameters"]["aspectRatio"] == "9:16"
+    # duration_sec을 안 넘기면 Veo가 기본값(8초)으로 생성해 대본이 의도한 길이보다 훨씬
+    # 길어지는 문제(사용자 피드백)가 있었다 — 항상 명시적으로 durationSeconds를 보낸다.
+    # 반드시 숫자 타입이어야 한다 — 문자열로 보내면 Veo가 400으로 거부한다(실제 API로 확인).
+    assert sent_body["parameters"]["durationSeconds"] == 4
+    assert isinstance(sent_body["parameters"]["durationSeconds"], int)
+
+
+def test_snap_duration_seconds_rounds_to_nearest_allowed_value():
+    assert _snap_duration_seconds(None) == 4
+    assert _snap_duration_seconds(3) == 4
+    assert _snap_duration_seconds(5) == 4
+    assert _snap_duration_seconds(6) == 6
+    assert _snap_duration_seconds(7) == 6
+    assert _snap_duration_seconds(9) == 8
+
+
+def test_generate_scene_video_forwards_duration_sec_to_request():
+    client = _FakeClient(
+        post_responses=[_submit_ok()],
+        get_responses=[_done_response(), _FakeResponse(200, content=b"fakevideobytes")],
+    )
+
+    generate_scene_video(b"reference-image", "image/jpeg", "고민", "나레이션", duration_sec=3, client=client)
+
+    sent_body = client.post_calls[0]["json"]
+    assert sent_body["parameters"]["durationSeconds"] == 4
 
 
 def test_generate_scene_video_polls_until_done():

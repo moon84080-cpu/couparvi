@@ -650,6 +650,56 @@ def calc_narration_speed(actual_duration_sec: float, target_duration_sec: float 
     return max(MIN_NARRATION_SPEED, min(speed, MAX_NARRATION_SPEED))
 
 
+# 실제 TTS를 부르기 전에 나레이션 글자 수만으로 자연스러운 발화 길이를 추정하는 데 쓴다
+# (app/script/prompts.py가 대본 작성 LLM에게 주는 "초당 5~6글자" 가이드와 같은 기준) —
+# 프롬프트 확인 화면에서 duration_sec이 실제로 도달 가능한 값인지 미리 알려주는 데 쓴다
+# (사용자 피드백, 2026-08-19: 극단적인 duration_sec이 위 clamp 때문에 실제 렌더 결과와
+# 최대 63% 차이 나는 걸 사용자가 미리 알 방법이 없었음 — 예: 라이브박스 2세대 대본).
+ESTIMATED_CHARS_PER_SEC = 5.5
+
+
+def predict_scene_duration_sec(narration: str, target_duration_sec: float | int | None) -> float:
+    """TTS를 실제로 부르기 전에, calc_narration_speed의 clamp를 반영한 예상 씬 길이(초)를 추정한다.
+
+    narration 글자 수로 "자연스러운 발화 길이"를 추정한 뒤(ESTIMATED_CHARS_PER_SEC), 실제
+    렌더링(render_script)과 똑같은 calc_narration_speed로 배속을 clamp해 예상 길이를 계산한다.
+    문장부호·숨쉬기 등 실제 TTS 결과와는 다소 오차가 있을 수 있는 추정치다.
+    """
+    char_count = len(narration or "")
+    if char_count == 0:
+        return 0.0
+    natural_duration = char_count / ESTIMATED_CHARS_PER_SEC
+    speed = calc_narration_speed(natural_duration, target_duration_sec)
+    return natural_duration / speed
+
+
+# duration_sec과 나레이션 길이가 이 이상 차이나면 경고(대시보드)/자동 재설정
+# (resolve_scene_duration_sec) 대상이 된다 — 그 이하 오차는 TTS 편차 수준으로 보고
+# 그대로 둔다(사용자 피드백, 2026-08-19).
+DURATION_MISMATCH_THRESHOLD_SEC = 1.0
+
+
+def resolve_scene_duration_sec(
+    narration: str, duration_sec: float | int | None
+) -> float | int | None:
+    """duration_sec이 나레이션 길이와 크게 안 맞으면, 대본(나레이션) 기준 예상 길이로 재설정한다.
+
+    사람이 붙여넣거나 직접 입력한 duration_sec이 나레이션 길이와 너무 다르면(예: 34자를
+    3초로 설정) 렌더링에서 결국 속도 clamp(calc_narration_speed)로 강제 조정되면서 실제
+    영상 길이가 설정값과 최대 63%까지 차이 났다(사용자 피드백, 2026-08-19 — 라이브박스
+    2세대 대본 실측). 경고만 띄우기보다 기본적으로 대본(나레이션)에 맞춰 자동으로
+    재설정하는 편이 낫다는 판단 — 그래야 화면에 보이는 duration_sec 자체가 실제로
+    만들어질 영상 길이와 계속 일치한다. 차이가 DURATION_MISMATCH_THRESHOLD_SEC 미만이면
+    (TTS 편차 수준) 원래 값을 그대로 둔다.
+    """
+    if not duration_sec or not narration:
+        return duration_sec
+    predicted = predict_scene_duration_sec(narration, duration_sec)
+    if abs(predicted - duration_sec) >= DURATION_MISMATCH_THRESHOLD_SEC:
+        return round(predicted, 1)
+    return duration_sec
+
+
 def render_scene_clip(
     image_path: str,
     audio_path: str,

@@ -16,6 +16,28 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
+# 형식(tone) 7종이 각자 다른 stage 키 체계를 쓰기 때문에(아래 SCRIPT_FORMATS 참고),
+# stage 값 자체는 이미지 생성 스타일 프리셋의 매핑 키로 쓸 수 없다 — 형식이 늘어날 때마다
+# 매핑표도 같이 늘려야 하는 문제가 생긴다. 그래서 stage와 별개로, 형식과 무관하게
+# 항상 같은 5개 값 중 하나를 쓰는 situation 태그를 scenes[]에 둔다(사용자 피드백,
+# 2026-08-18) — app/media/image_generator.py의 SITUATION_STYLE_PRESETS가 이 값으로
+# 씬마다 다른 이미지 스타일을 얹는다.
+SITUATION_CHOICES: tuple[str, ...] = (
+    "situation_hook",
+    "situation_analysis",
+    "situation_usage",
+    "situation_conclusion",
+    "situation_cta",
+)
+
+SITUATION_DESCRIPTIONS: dict[str, str] = {
+    "situation_hook": "문제 제기/공감/해프닝 — 아직 해결책(상품)이 나오기 전, 감정을 건드리는 장면",
+    "situation_analysis": "정보·근거 전달, 데이터/설계 포인트 강조 — 사실설명이나 비교·체크리스트처럼 설명 위주인 장면",
+    "situation_usage": "실제 사용/시연 — 상품을 직접 쓰는 모습을 보여주는 장면",
+    "situation_conclusion": "최종 결론/추천 대상 — 결과와 만족감을 정리하는 장면",
+    "situation_cta": "구매 링크로 유도하는 마무리 장면",
+}
+
 
 @dataclass(frozen=True)
 class StageSpec:

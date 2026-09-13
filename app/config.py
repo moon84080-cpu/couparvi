@@ -28,6 +28,11 @@ COUPANG_SECRET_KEY = os.getenv("COUPANG_SECRET_KEY", "")
 # 네이버 쇼핑검색 오픈API — 쿠팡과 무관, 수동 등록 상품의 대표 이미지 자동 채움용
 NAVER_CLIENT_ID = os.getenv("NAVER_CLIENT_ID", "")
 NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET", "")
+# 네이버 쇼핑검색 API 자체를 켤지 여부. 2026-08-17 네이버 쪽 정책 변경으로 이 앱에 등록된
+# 키의 쇼핑검색 API가 막혀서(SE05: 존재하지 않는 검색 api입니다 — 같은 키의 블로그검색은
+# 정상 동작해 키 자체 문제는 아님을 확인함) 한시적으로 기능 자체를 끈다(사용자 피드백).
+# 나중에 네이버 쪽 정책이 정리되면 이 값을 true로 되돌리면 코드 변경 없이 재활성화된다.
+NAVER_SEARCH_ENABLED = os.getenv("NAVER_SEARCH_ENABLED", "false").lower() == "true"
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
@@ -36,6 +41,17 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "")
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+
+# 리뷰 스크린샷 OCR(app/review/ocr.py) 공급자 — TTS_PROVIDER와 같은 패턴.
+# "gemini"(기본값, gemini-3.5-flash-lite): 실제 리뷰 캡처 2장으로 claude와 비교 실측한
+# 결과(사용자 피드백, 2026-08-18) 속도(4~12배)·정확도·비용 모두 압도적으로 우세해
+# 기본값으로 승격했다 — 특히 글자가 작고 빽빽한 캡처에서 claude는 문장이 통째로
+# 깨졌지만 gemini는 원문과 거의 동일하게 추출했다. 이미 있는 GEMINI_API_KEY로 바로
+# 동작한다. 다른 선택지: "claude"(예전 기본값, ANTHROPIC_API_KEY), "openai"(gpt-4o-mini,
+# OPENAI_API_KEY — 추가만 하고 인식률은 아직 검증 안 함).
+OCR_PROVIDER = os.getenv("OCR_PROVIDER", "gemini")
 
 # Gemini(나노바나나) 이미지 생성 — 씬의 화면 연출에 맞춰 실사 상품 사진을 참고 이미지로
 # 넣어 새 이미지를 만드는 데 쓴다 (app/media/image_generator.py).

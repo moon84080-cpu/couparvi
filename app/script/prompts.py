@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 
 from app.config import DEFAULT_TARGET_PERSONA, PARTNERS_DISCLOSURE
-from app.script.formats import ScriptFormat, all_known_tones, get_format
+from app.script.formats import SITUATION_CHOICES, SITUATION_DESCRIPTIONS, ScriptFormat, all_known_tones, get_format
 
 EDUCATIONAL_NOTE_INSTRUCTION_TEMPLATE = """이 상품은 needs_education=true이므로 {stage_label} 단계 직후에 삽입할
 educational_note를 함께 생성한다. 규칙:
@@ -61,6 +61,7 @@ def _build_output_schema_example(needs_education: bool, fmt: ScriptFormat) -> di
             {
                 "seq": 1,
                 "stage": fmt.stages[0].key,
+                "situation": "situation_hook",
                 "narration": "...",
                 "caption": "...",
                 "visual": "긴장감: 기기를 조심스럽게 만지며 불안해하는 손 클로즈업",
@@ -70,6 +71,7 @@ def _build_output_schema_example(needs_education: bool, fmt: ScriptFormat) -> di
             {
                 "seq": 2,
                 "stage": fmt.cta_stage,
+                "situation": "situation_cta",
                 "narration": "...",
                 "caption": "...",
                 "visual": "만족감: 완성된 결과물을 보며 흐뭇해하는 컷",
@@ -122,6 +124,12 @@ def build_system_prompt(tone: str, needs_education: bool) -> str:
 - scenes[].stage에는 그 씬이 구조(structure)의 어느 단계에 해당하는지 {"/".join(stage_keys)} 중
   정확히 하나를 넣는다. 한 단계를 씬 여러 개로 나눠 썼다면 그 씬들 모두 같은 stage 값을 쓴다.
   scenes는 stage 순서대로({" -> ".join(stage_keys)}) 정렬한다.
+- scenes[].situation에는 stage와 별개로, 이 형식이 무엇이든 항상 다음 5개 값 중 정확히 하나를
+  넣는다 — 이미지 생성 단계가 이 값으로 씬마다 다른 화면 스타일(정보 전달형/시연형/마무리형 등)을
+  고른다:
+{chr(10).join(f"  - {key}: {desc}" for key, desc in SITUATION_DESCRIPTIONS.items())}
+  situation은 stage 이름과 문자 그대로 일치할 필요 없다 — 그 씬의 실제 내용(공감/문제 제기인지,
+  근거·설계 설명인지, 사용 시연인지, 결과 정리인지, 구매 유도인지)을 보고 판단한다.
 - narration을 모두 합친 영상 길이(estimated_duration_sec)는 30~45초.
 - scenes[].duration_sec은 그 씬 narration을 한국어 TTS로 자연스럽게 읽는 데 걸리는 시간(초)을
   추정해서 쓴다(대략 초당 5~6글자 기준 — 실제 TTS 실측 결과를 반영한 수치다). 실제 렌더링에서

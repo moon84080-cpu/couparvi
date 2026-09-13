@@ -172,6 +172,7 @@ Claude가 reviews_raw를 입력받아 생성. **원문을 그대로 옮기지 �
     {
       "seq": 1,
       "stage": "empathy",
+      "situation": "situation_hook",
       "narration": "...",
       "caption": "...",
       "visual": "감정/분위기 태그: 구체적으로 어떤 장면이 보이면 좋을지",
@@ -207,6 +208,12 @@ Claude가 reviews_raw를 입력받아 생성. **원문을 그대로 옮기지 �
   노출되지 않는다.
 - `scenes[].visual`은 그 씬에 어울리는 화면 연출을 짧게 적어 후보 이미지 중 실제로 쓰일 컷을
   고르는 데 참고한다(`app/script/image_matcher.py`) — 형식과 무관하게 공통.
+- `scenes[].situation`(v2.5)은 `stage`와 별개로, 형식(`tone`)과 무관하게 항상
+  `app/script/formats.py`의 `SITUATION_CHOICES` 5개 값(`situation_hook` / `situation_analysis`
+  / `situation_usage` / `situation_conclusion` / `situation_cta`) 중 하나다. 이미지 생성
+  (`app/media/image_generator.py`의 `SITUATION_STYLE_PRESETS`)이 이 값으로 씬마다 다른 화면
+  스타일(정보 전달형/시연형/마무리형 등)을 얹는다 — 형식이 7종으로 늘어나도 프리셋 매핑표는
+  그대로 5개만 유지된다.
 
 **고지문구(disclosure) 배치(v2.2)**: `PARTNERS_DISCLOSURE` 문구는 narration(음성으로 낭독되는 모든 텍스트: `structure.*`, `scenes[].narration`)에는 절대 포함하지 않는다. `youtube.description`의 맨 마지막 줄에만 정확히 그대로 넣는다. 영상 내 마지막 장면 시각적 오버레이(Phase 3, `disclosure` 필드 사용)는 이와 별개로 항상 표시되므로 음성으로 다시 읽을 필요가 없다.
 
@@ -216,7 +223,7 @@ Claude가 reviews_raw를 입력받아 생성. **원문을 그대로 옮기지 �
 - 과장·확정적 인과 표현 대신 "~일 수 있어요", "~로 알려져 있어요" 같은 절제된 어투 사용
 - `needs_education=false`인 상품은 `included: false, text: ""`로 둔다
 
-제약: `scenes` 3~8개, 30~45초(형식과 무관하게 전역), `narration`은 reviews_raw와 8단어 이상 연속 일치 금지, `structure`는 형식이 정의한 필드 전부 필수(비어있지 않음), `scenes[].stage`는 그 형식의 stage 키 중 하나여야 함, `tone`은 `SCRIPT_FORMATS`에 정의된 값 중 하나.
+제약: `scenes` 3~8개, 30~45초(형식과 무관하게 전역), `narration`은 reviews_raw와 8단어 이상 연속 일치 금지, `structure`는 형식이 정의한 필드 전부 필수(비어있지 않음), `scenes[].stage`는 그 형식의 stage 키 중 하나여야 함, `scenes[].situation`은 `SITUATION_CHOICES` 5개 값 중 하나여야 함(형식과 무관), `tone`은 `SCRIPT_FORMATS`에 정의된 값 중 하나.
 
 ## 4-1. 캡션 오버라이드 JSON 스키마 (render_jobs.caption_overrides)
 
